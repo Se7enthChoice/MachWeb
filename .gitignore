@@ -1,0 +1,19 @@
+# --- C++ & CMake / Emscripten ---
+sim-core/build/
+sim-core/.vs/
+*.sdf
+*.suo
+*.user
+
+# --- Node.js & Next.js ---
+web-app/node_modules/
+web-app/.next/
+web-app/out/
+web-app/dist/
+.pnp
+.pnp.js
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db
+*.log
