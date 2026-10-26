@@ -43,8 +43,8 @@ Typically cloned as a sibling directory to your project workspace (e.g., `C:\Use
 1. Clone the Repository
 
 ```powershell
-git clone https://github.com/YOUR_USERNAME/aether-vector.git
-cd aether-vector
+git clone https://github.com/YOUR_USERNAME/MachWeb.git
+cd MachWeb
 ```
 
 2. Set Up the Emscripten SDK (EMSDK)
@@ -57,7 +57,7 @@ git clone https://github.com/emscripten-core/emsdk.git
 cd emsdk
 ./emsdk install latest
 ./emsdk activate latest
-cd ../aether-vector
+cd ../MachWeb
 ```
 
 (Note: Verify that the path to `emsdk_env.ps1` matches what is configured at the top of your `build.ps1` script.)
@@ -104,6 +104,6 @@ npm run dev
 Open your browser and navigate to http://localhost:3000.
 
 ## Development Workflow
-Modifying Physics (`sim-core/src/main.cpp`): Edit your C++ simulation logic, then run `./build.ps1` from the root folder to recompile. Refresh your browser to see the updates instantly.
+Modifying Physics (`sim-core/main.cpp`): Edit your C++ simulation logic, then run `./build.ps1` from the root folder to recompile. Refresh your browser to see the updates instantly.
 
-Modifying UI/Dashboard (`web-app/src/app/page.tsx`): Next.js handles hot-reloading for all TypeScript/React frontend code automatically.
+Modifying UI/Dashboard (`web-app/app/page.tsx`): Next.js handles hot-reloading for all TypeScript/React frontend code automatically.
