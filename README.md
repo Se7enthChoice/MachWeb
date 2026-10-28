@@ -1,5 +1,5 @@
 MachWeb
-A high-performance, browser-native tactical flight simulation engine. Built with a C++23 physics core compiled to WebAssembly via Emscripten, integrated with a Next.js & React telemetry dashboard running at a deterministic 60Hz.
+A browser-native first-person 6DOF flight simulator. Its C++ flight dynamics core is compiled to WebAssembly with Emscripten and drives a Three.js cockpit view and telemetry dashboard.
 
 ## Architecture Overview
 
@@ -7,7 +7,7 @@ A high-performance, browser-native tactical flight simulation engine. Built with
 MachWeb/
 ├── sim-core/              # C++23 physics simulation core & CMake project
 │
-│   ├── src/main.cpp       # Flight dynamics model & Embind bindings
+│   ├── main.cpp           # Flight dynamics model & Embind bindings
 │
 │   └── CMakeLists.txt     # Emscripten-compatible CMake config
 │
@@ -102,6 +102,16 @@ npm run dev
 ```
 
 Open your browser and navigate to http://localhost:3000.
+
+## Flight Controls
+
+- **W / S**: Pitch up / down
+- **A / D**: Roll left / right
+- **Q / E**: Yaw left / right
+- **Shift / Ctrl**: Increase / decrease throttle
+- **L**: Toggle flight assist (auto-level)
+
+The simulation advances with the browser animation loop and bounds large frame deltas to keep the flight model stable after pauses or tab switches.
 
 ## Development Workflow
 Modifying Physics (`sim-core/main.cpp`): Edit your C++ simulation logic, then run `./build.ps1` from the root folder to recompile. Refresh your browser to see the updates instantly.
