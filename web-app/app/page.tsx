@@ -19,6 +19,7 @@ interface SimEngineInstance {
   getRoll(): number;
   getHeading(): number;
   getVerticalSpeed(): number;
+  getStalled(): boolean;
   delete(): void;
 }
 
@@ -38,6 +39,7 @@ export default function Home() {
   const [roll, setRoll] = useState<number>(0);
   const [heading, setHeading] = useState<number>(0);
   const [vSpeed, setVSpeed] = useState<number>(0);
+  const [stalled, setStalled] = useState(false);
   const [posX, setPosX] = useState<number>(0);
   const [posZ, setPosZ] = useState<number>(0);
   const [autoLevel, setAutoLevel] = useState(false);
@@ -159,6 +161,7 @@ export default function Home() {
             setRoll(nextRoll);
             setHeading(nextHeading);
             setVSpeed(nextVSpeed);
+            setStalled(engineInstance.getStalled());
           }
 
           animationFrameId = requestAnimationFrame(loop);
@@ -184,11 +187,11 @@ export default function Home() {
   }, []);
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-zinc-950 text-zinc-100 p-6 font-mono">
-      <div className="max-w-4xl w-full bg-zinc-900 border border-zinc-800 rounded-xl p-6 shadow-2xl">
+    <main className="flex min-h-screen flex-col items-stretch justify-start bg-zinc-950 p-3 font-mono text-zinc-100 sm:p-5">
+      <div className="mx-auto w-full max-w-[1600px] rounded-xl border border-zinc-800 bg-zinc-900 p-3 shadow-2xl sm:p-5">
 
         {/* Header */}
-        <div className="flex justify-between items-center border-b border-zinc-800 pb-4 mb-6">
+        <div className="mb-4 flex items-center justify-between border-b border-zinc-800 pb-3">
           <div>
             <h1 className="text-xl font-bold tracking-wider text-emerald-400">
               MACHWEB // FIRST-PERSON FLIGHT
@@ -214,7 +217,7 @@ export default function Home() {
         </div>
 
         {/* 3D Viewport */}
-        <div className="mb-6">
+        <div className="mb-4">
           <FlightViewport
             posX={posX}
             posZ={posZ}
@@ -223,11 +226,12 @@ export default function Home() {
             roll={roll}
             heading={heading}
             airspeed={airspeed}
+            stalled={stalled}
           />
         </div>
 
         {/* Instruments */}
-        <div className="grid grid-cols-4 gap-4 mb-6">
+        <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
           <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 text-center">
             <span className="text-xs text-zinc-500 uppercase tracking-widest block mb-1">Airspeed</span>
             <span className="text-2xl font-bold text-zinc-100">{airspeed.toFixed(0)}</span>
@@ -273,8 +277,8 @@ export default function Home() {
           <p className="font-bold text-zinc-300 mb-2">PILOT FLIGHT CONTROLS:</p>
           <div className="grid grid-cols-2 gap-2">
             <div><strong className="text-emerald-400">W / S</strong>: Pitch up / down</div>
-            <div><strong className="text-emerald-400">A / D</strong>: Roll left / right</div>
-            <div><strong className="text-emerald-400">Q / E</strong>: Yaw left / right</div>
+            <div><strong className="text-emerald-400">A / D</strong>: Bank for turns</div>
+            <div><strong className="text-emerald-400">Q / E</strong>: Rudder yaw / sideslip</div>
             <div><strong className="text-emerald-400">SHIFT / CTRL</strong>: Throttle up / down</div>
             <div><strong className="text-emerald-400">L</strong> (or button): Toggle flight assist</div>
           </div>

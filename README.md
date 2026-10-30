@@ -106,12 +106,13 @@ Open your browser and navigate to http://localhost:3000.
 ## Flight Controls
 
 - **W / S**: Pitch up / down
-- **A / D**: Roll left / right
-- **Q / E**: Yaw left / right
+- **A / D**: Bank for turns
+- **Q / E**: Rudder yaw / sideslip
 - **Shift / Ctrl**: Increase / decrease throttle
 - **L**: Toggle flight assist (auto-level)
 
 The simulation advances with the browser animation loop and bounds large frame deltas to keep the flight model stable after pauses or tab switches.
+Pitch, roll, and rudder controls have speed-sensitive response and aerodynamic damping. Bank produces sustained turns; rudder introduces a damped sideslip rather than directly steering the flight path. Vertical speed is limited to ±6,000 ft/min to keep extreme climbs and dives recoverable.
 
 ## Development Workflow
 Modifying Physics (`sim-core/main.cpp`): Edit your C++ simulation logic, then run `./build.ps1` from the root folder to recompile. Refresh your browser to see the updates instantly.

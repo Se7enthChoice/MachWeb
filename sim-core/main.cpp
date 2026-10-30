@@ -10,6 +10,9 @@ private:
     static constexpr float degreesToRadians = 3.14159265f / 180.0f;
     static constexpr float radiansToDegrees = 180.0f / 3.14159265f;
     static constexpr float maxAirspeed = 850.0f;
+    static constexpr float maxVerticalSpeed = 9800.0f;
+    static constexpr float stallSpeed = 120.0f;
+    static constexpr float cruiseAirspeed = 300.0f;
 
     float posX = 0.0f;
     float altitude = 5000.0f;
@@ -23,6 +26,9 @@ private:
     float pitchAngle = 0.0f;
     float rollAngle = 0.0f;
     float heading = 0.0f;
+    float pitchRate = 0.0f;
+    float rollRate = 0.0f;
+    float yawRate = 0.0f;
     float verticalSpeed = 0.0f;
 
     float pitchInput = 0.0f;
@@ -37,6 +43,12 @@ private:
     static float wrapHeading(float angle) {
         angle = std::fmod(angle, 360.0f);
         return angle < 0.0f ? angle + 360.0f : angle;
+    }
+
+    static float wrapSignedAngle(float angle) {
+        angle = std::fmod(angle + 180.0f, 360.0f);
+        if (angle < 0.0f) angle += 360.0f;
+        return angle - 180.0f;
     }
 
     static float clampFinite(float value, float minimum, float maximum) {
@@ -58,17 +70,35 @@ public:
         }
         airspeed = clampFinite(speedFeetPerSecond / ktsToFeetPerSecond, 0.0f, maxAirspeed);
 
-        float targetPitch = pitchInput;
-        float targetRoll = rollInput;
+        const float controlAuthority = std::clamp(airspeed / cruiseAirspeed, 0.35f, 1.35f);
+        const float maxPitchRate = 55.0f * controlAuthority;
+        const float maxRollRate = 100.0f * controlAuthority;
+        const float maxYawRate = 10.0f * controlAuthority;
+        float targetPitchRate = pitchInput * maxPitchRate;
+        float targetRollRate = rollInput * maxRollRate;
+        const float targetYawRate = yawInput * maxYawRate;
         if (autoLevelEnabled) {
-            if (std::abs(pitchInput) < 0.01f) targetPitch -= pitchAngle / 12.0f;
-            if (std::abs(rollInput) < 0.01f) targetRoll -= rollAngle / 20.0f;
+            if (std::abs(pitchInput) < 0.01f) {
+                targetPitchRate = std::clamp(-pitchAngle * 1.5f, -maxPitchRate, maxPitchRate);
+            }
+            if (std::abs(rollInput) < 0.01f) {
+                targetRollRate = std::clamp(-rollAngle * 2.0f, -maxRollRate, maxRollRate);
+            }
         }
 
-        pitchAngle += std::clamp(targetPitch, -1.0f, 1.0f) * 55.0f * dt;
-        rollAngle += std::clamp(targetRoll, -1.0f, 1.0f) * 100.0f * dt;
-        pitchAngle = std::clamp(pitchAngle, -85.0f, 85.0f);
-        rollAngle = std::clamp(rollAngle, -85.0f, 85.0f);
+        pitchRate += (targetPitchRate - pitchRate) * std::min(4.0f * dt, 1.0f);
+        rollRate += (targetRollRate - rollRate) * std::min(5.0f * dt, 1.0f);
+        yawRate += (targetYawRate - yawRate) * std::min(4.0f * dt, 1.0f);
+
+        pitchAngle += pitchRate * dt;
+        rollAngle = wrapSignedAngle(rollAngle + rollRate * dt);
+        if (pitchAngle > 85.0f) {
+            pitchAngle = 85.0f;
+            pitchRate = std::min(pitchRate, 0.0f);
+        } else if (pitchAngle < -85.0f) {
+            pitchAngle = -85.0f;
+            pitchRate = std::max(pitchRate, 0.0f);
+        }
 
         const float pitchRad = pitchAngle * degreesToRadians;
         const float rollRad = rollAngle * degreesToRadians;
@@ -86,6 +116,9 @@ public:
         const float upX = -sinHeading * sinPitch * cosRoll + cosHeading * sinRoll;
         const float upY = cosPitch * cosRoll;
         const float upZ = cosHeading * sinPitch * cosRoll + sinHeading * sinRoll;
+        const float rightX = cosHeading * cosRoll + sinHeading * sinPitch * sinRoll;
+        const float rightY = -cosPitch * sinRoll;
+        const float rightZ = sinHeading * cosRoll - cosHeading * sinPitch * sinRoll;
 
         const float speedX = velocityX / std::max(speedFeetPerSecond, 1.0f);
         const float speedY = velocityY / std::max(speedFeetPerSecond, 1.0f);
@@ -105,22 +138,31 @@ public:
         liftY /= liftDirectionLength;
         liftZ /= liftDirectionLength;
 
-        const float liftFactor = std::clamp(airspeed / 100.0f, 0.0f, 1.0f);
+        const float liftFactor = airspeed / cruiseAirspeed;
         const float lift = std::min(
-            gravity * liftFactor / std::max(cosRoll, 0.2f),
-            gravity * 3.0f);
+            gravity * liftFactor * liftFactor / std::max(std::abs(cosRoll), 0.2f),
+            gravity * 7.0f);
         const float bankedTurnRate = radiansToDegrees * lift * sinRoll /
             std::max(speedFeetPerSecond, 50.0f);
-        heading = wrapHeading(heading + (bankedTurnRate + yawInput * 45.0f) * dt);
+        heading = wrapHeading(heading + (bankedTurnRate + yawRate) * dt);
 
-        const float targetAirspeed = 100.0f + throttle * 465.0f;
-        const float thrustAcceleration =
-            (targetAirspeed - airspeed) * 0.4f * ktsToFeetPerSecond;
+        const float thrustAcceleration = throttle * 42.0f;
+        const float dragAcceleration = speedFeetPerSecond * 0.03f;
+        const float lateralVelocity =
+            velocityX * rightX + velocityY * rightY + velocityZ * rightZ;
+        const float lateralAcceleration = -lateralVelocity * 2.5f;
 
-        velocityX += (forwardX * thrustAcceleration + liftX * lift) * dt;
-        velocityY += (forwardY * thrustAcceleration + liftY * lift - gravity) * dt;
-        velocityZ += (forwardZ * thrustAcceleration + liftZ * lift) * dt;
+        velocityX += (forwardX * thrustAcceleration + liftX * lift -
+            speedX * dragAcceleration + rightX * lateralAcceleration) * dt;
+        velocityY += (forwardY * thrustAcceleration + liftY * lift -
+            speedY * dragAcceleration + rightY * lateralAcceleration - gravity) * dt;
+        velocityZ += (forwardZ * thrustAcceleration + liftZ * lift -
+            speedZ * dragAcceleration + rightZ * lateralAcceleration) * dt;
 
+        velocityY = clampFinite(
+            velocityY,
+            -maxVerticalSpeed / 60.0f,
+            maxVerticalSpeed / 60.0f);
         speedFeetPerSecond = std::sqrt(
             velocityX * velocityX + velocityY * velocityY + velocityZ * velocityZ);
         const float maxSpeedFeetPerSecond = maxAirspeed * ktsToFeetPerSecond;
@@ -131,15 +173,6 @@ public:
             velocityZ *= scale;
         }
 
-        // Keep the simplified aircraft model coordinated: travel follows the nose
-        // so the first-person view never points away from the flight path.
-        const float alignedHeadingRad = heading * degreesToRadians;
-        const float alignedSpeed = std::sqrt(
-            velocityX * velocityX + velocityY * velocityY + velocityZ * velocityZ);
-        velocityX = std::sin(alignedHeadingRad) * cosPitch * alignedSpeed;
-        velocityY = sinPitch * alignedSpeed;
-        velocityZ = -std::cos(alignedHeadingRad) * cosPitch * alignedSpeed;
-
         posX += velocityX * dt;
         altitude += velocityY * dt;
         posZ += velocityZ * dt;
@@ -148,10 +181,6 @@ public:
         posX = clampFinite(posX, -100000000.0f, 100000000.0f);
         posZ = clampFinite(posZ, -100000000.0f, 100000000.0f);
         altitude = clampFinite(altitude, -1000000.0f, 1000000.0f);
-        verticalSpeed = clampFinite(
-            verticalSpeed,
-            -maxAirspeed * ktsToFeetPerSecond * 60.0f,
-            maxAirspeed * ktsToFeetPerSecond * 60.0f);
         airspeed = clampFinite(
             std::sqrt(velocityX * velocityX + velocityY * velocityY + velocityZ * velocityZ) /
                 ktsToFeetPerSecond,
@@ -183,6 +212,7 @@ public:
     float getRoll() const { return rollAngle; }
     float getHeading() const { return heading; }
     float getVerticalSpeed() const { return verticalSpeed; }
+    bool getStalled() const { return airspeed < stallSpeed; }
 };
 
 EMSCRIPTEN_BINDINGS(sim_engine) {
@@ -202,5 +232,6 @@ EMSCRIPTEN_BINDINGS(sim_engine) {
         .function("getPitch", &SimEngine::getPitch)
         .function("getRoll", &SimEngine::getRoll)
         .function("getHeading", &SimEngine::getHeading)
-        .function("getVerticalSpeed", &SimEngine::getVerticalSpeed);
+        .function("getVerticalSpeed", &SimEngine::getVerticalSpeed)
+        .function("getStalled", &SimEngine::getStalled);
 }

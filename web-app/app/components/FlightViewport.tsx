@@ -11,9 +11,10 @@ interface FlightViewportProps {
   roll: number;
   heading: number;
   airspeed: number;
+  stalled: boolean;
 }
 
-export default function FlightViewport({ posX, posZ, altitude, pitch, roll, heading, airspeed }: FlightViewportProps) {
+export default function FlightViewport({ posX, posZ, altitude, pitch, roll, heading, airspeed, stalled }: FlightViewportProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
 
@@ -101,7 +102,7 @@ export default function FlightViewport({ posX, posZ, altitude, pitch, roll, head
   }, [posX, posZ, altitude, pitch, roll, heading]);
 
   return (
-    <div className="relative h-[28rem] w-full overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 shadow-inner sm:h-[32rem]">
+    <div className="relative h-[58vh] min-h-80 max-h-[56rem] w-full overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 shadow-inner sm:h-[70vh]">
       <div ref={mountRef} className="w-full h-full" />
       <div className="pointer-events-none absolute left-1/2 top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2">
         <span className="absolute left-1/2 top-0 h-3 w-px -translate-x-1/2 bg-emerald-300/80" />
@@ -110,6 +111,11 @@ export default function FlightViewport({ posX, posZ, altitude, pitch, roll, head
       <div className="pointer-events-none absolute left-3 top-3 rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 font-mono text-xs text-emerald-300 backdrop-blur">
         MACHWEB // FIRST-PERSON
       </div>
+      {stalled && (
+        <div className="pointer-events-none absolute right-3 top-3 rounded border border-red-500/60 bg-red-950/85 px-3 py-1 font-mono text-sm font-bold tracking-widest text-red-300 backdrop-blur">
+          STALL
+        </div>
+      )}
       <div className="pointer-events-none absolute bottom-3 right-3 rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 font-mono text-xs text-zinc-200 backdrop-blur">
         HDG {heading.toFixed(0)}° · ALT {altitude.toFixed(0)} FT · {airspeed.toFixed(0)} KT
       </div>
