@@ -116,7 +116,7 @@ Configure the start location on the preflight screen before selecting **Start Fl
 Choose an initial time of day on the preflight screen. A real-time 24-hour day/night cycle starts at that time, with sunrise at 06:00 and sunset at 18:00; sky color, lighting, and terrain fog change through the cycle. Visible sun and moon markers track the aircraft, moonlight illuminates terrain at night, and the sun casts soft terrain shadows during the day.
 
 The simulation advances with the browser animation loop and bounds large frame deltas to keep the flight model stable after pauses or tab switches.
-Pitch, roll, and rudder controls have speed-sensitive response and aerodynamic damping. Bank produces sustained turns; rudder introduces a damped sideslip rather than directly steering the flight path. Vertical speed is limited to ±9,800 ft/min to keep extreme climbs and dives recoverable.
+Pitch, roll, and rudder controls have speed-sensitive response and aerodynamic damping. Pitch input applies an aerodynamic moment around the aircraft's rolled lateral axis rather than a fixed rotation rate, with pitch authority reduced at high angles of attack. Lift responds to the angle of attack between aircraft attitude and the flight path, so brief differences between nose attitude and climb or descent are possible during maneuvers. Bank produces sustained turns; rudder introduces a damped sideslip rather than directly steering the flight path. Vertical speed is limited to keep extreme climbs and dives recoverable.
 
 ## Terrain
 
