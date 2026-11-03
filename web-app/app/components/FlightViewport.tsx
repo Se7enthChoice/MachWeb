@@ -23,6 +23,10 @@ const visualScale = 0.01;
 const feetPerMeter = 3.28084;
 const TERRAIN_MESH_SEGMENTS = 64;
 const MAX_CONCURRENT_IMAGERY_REQUESTS = 8;
+const CELESTIAL_DISTANCE = 1800;
+const LIGHT_DISTANCE = 1600;
+const FOG_NEAR = 300;
+const FOG_FAR = 1300;
 const NIGHT_SKY = new THREE.Color(0x071225);
 const TWILIGHT_SKY = new THREE.Color(0xe59a72);
 const DAY_SKY = new THREE.Color(0x79b9dc);
@@ -62,8 +66,7 @@ export default function FlightViewport({
   const mountRef = useRef<HTMLDivElement>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
-  const ambientLightRef = useRef<THREE.AmbientLight | null>(null);
-  const sunLightRef = useRef<THREE.DirectionalLight | null>(null);
+  const simulationTimeRef = useRef(simulationTimeMinutes);
   const fallbackGroundRef = useRef<THREE.Group | null>(null);
   const terrainMeshesRef = useRef<
     Array<THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial>>
@@ -82,7 +85,7 @@ export default function FlightViewport({
     sceneRef.current = scene;
     scene.background = DAY_SKY.clone();
     // Fog is measured in scene units (feet * visualScale), not simulator feet.
-    scene.fog = new THREE.Fog(DAY_SKY, 1250, 2500);
+    scene.fog = new THREE.Fog(DAY_SKY, FOG_NEAR, FOG_FAR);
 
     // 2. Camera (First-Person FOV)
     const width = Math.max(currentMount.clientWidth, 1);
@@ -92,6 +95,8 @@ export default function FlightViewport({
 
     // 3. Renderer
     const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     currentMount.appendChild(renderer.domElement);
@@ -102,6 +107,7 @@ export default function FlightViewport({
       new THREE.MeshLambertMaterial({ color: 0x263e3a }),
     );
     ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
     fallbackGround.add(ground);
 
     const gridHelper = new THREE.GridHelper(20000, 200, 0x79a78f, 0x39564a);
@@ -112,11 +118,55 @@ export default function FlightViewport({
 
     const ambientLight = new THREE.AmbientLight(0xffffff, 1.2);
     scene.add(ambientLight);
-    ambientLightRef.current = ambientLight;
     const dirLight = new THREE.DirectionalLight(0xffffff, 2);
-    dirLight.position.set(100, 200, 100);
+    dirLight.castShadow = true;
+    dirLight.shadow.mapSize.set(2048, 2048);
+    dirLight.shadow.camera.left = -1200;
+    dirLight.shadow.camera.right = 1200;
+    dirLight.shadow.camera.top = 1200;
+    dirLight.shadow.camera.bottom = -1200;
+    dirLight.shadow.camera.near = 1;
+    dirLight.shadow.camera.far = LIGHT_DISTANCE * 2.5;
+    dirLight.shadow.bias = -0.00015;
+    dirLight.shadow.normalBias = 0.025;
+    dirLight.shadow.radius = 3;
     scene.add(dirLight);
-    sunLightRef.current = dirLight;
+    scene.add(dirLight.target);
+
+    const moonLight = new THREE.DirectionalLight(NIGHT_LIGHT, 0.2);
+    moonLight.castShadow = false;
+    scene.add(moonLight);
+    scene.add(moonLight.target);
+
+    const sunMarker = new THREE.Mesh(
+      new THREE.SphereGeometry(28, 24, 16),
+      new THREE.MeshBasicMaterial({
+        color: 0xffe6a3,
+        fog: false,
+        transparent: true,
+        toneMapped: false,
+      }),
+    );
+    const moonMarker = new THREE.Mesh(
+      new THREE.SphereGeometry(20, 24, 16),
+      new THREE.MeshBasicMaterial({
+        color: 0xd8e2ff,
+        fog: false,
+        transparent: true,
+        toneMapped: false,
+      }),
+    );
+    scene.add(sunMarker, moonMarker);
+
+    const lightTarget = new THREE.Vector3();
+    const sunDirection = new THREE.Vector3();
+    const moonDirection = new THREE.Vector3();
+    const skyColor = new THREE.Color();
+    const ambientColor = new THREE.Color();
+    const sunlightColor = new THREE.Color();
+    const moonlightColor = new THREE.Color();
+    let lastShadowUpdate = 0;
+    renderer.shadowMap.autoUpdate = false;
 
     const handleResize = () => {
       const w = Math.max(currentMount.clientWidth, 1);
@@ -131,6 +181,55 @@ export default function FlightViewport({
     let animId: number;
     const animate = () => {
       animId = requestAnimationFrame(animate);
+      const timeMinutes = simulationTimeRef.current;
+      const solarAngle = (timeMinutes / (24 * 60)) * Math.PI * 2 - Math.PI / 2;
+      const solarHeight = Math.sin(solarAngle);
+      const daylight = THREE.MathUtils.clamp((solarHeight + 0.12) / 0.32, 0, 1);
+      const twilight = 1 - THREE.MathUtils.clamp(Math.abs(solarHeight) * 3, 0, 1);
+      const sky = skyColor
+        .copy(NIGHT_SKY)
+        .lerp(TWILIGHT_SKY, twilight)
+        .lerp(DAY_SKY, daylight);
+
+      scene.background = sky;
+      if (scene.fog instanceof THREE.Fog) scene.fog.color.copy(sky);
+      ambientLight.color.copy(ambientColor.copy(NIGHT_LIGHT).lerp(DAY_LIGHT, daylight));
+      ambientLight.intensity = 0.18 + daylight * 1.02;
+      dirLight.color.copy(sunlightColor.copy(TWILIGHT_SKY).lerp(DAY_LIGHT, daylight));
+      dirLight.intensity = 0.08 + daylight * 1.92;
+      dirLight.castShadow = daylight > 0.05;
+      moonLight.color.copy(moonlightColor.copy(NIGHT_LIGHT).lerp(DAY_LIGHT, daylight));
+      moonLight.intensity = 0.22 * (1 - daylight);
+
+      // The visible bodies follow the aircraft; the lights target the terrain below it.
+      lightTarget.set(camera.position.x, 0, camera.position.z);
+      sunDirection.set(Math.cos(solarAngle), solarHeight, 0).normalize();
+      moonDirection.copy(sunDirection).negate();
+      dirLight.target.position.copy(lightTarget);
+      dirLight.position.copy(lightTarget).addScaledVector(sunDirection, LIGHT_DISTANCE);
+      moonLight.target.position.copy(lightTarget);
+      moonLight.position.copy(lightTarget).addScaledVector(moonDirection, LIGHT_DISTANCE);
+      sunMarker.position
+        .copy(camera.position)
+        .addScaledVector(sunDirection, CELESTIAL_DISTANCE);
+      moonMarker.position
+        .copy(camera.position)
+        .addScaledVector(moonDirection, CELESTIAL_DISTANCE);
+      (sunMarker.material as THREE.MeshBasicMaterial).opacity = THREE.MathUtils.clamp(
+        (solarHeight + 0.12) / 0.25,
+        0,
+        1,
+      );
+      (moonMarker.material as THREE.MeshBasicMaterial).opacity = THREE.MathUtils.clamp(
+        (-solarHeight + 0.12) / 0.25,
+        0,
+        0.9,
+      );
+      if (renderer.shadowMap.enabled && performance.now() - lastShadowUpdate >= 1000) {
+        renderer.shadowMap.needsUpdate = true;
+        lastShadowUpdate = performance.now();
+      }
+
       renderer.render(scene, camera);
     };
     animate();
@@ -138,6 +237,7 @@ export default function FlightViewport({
       resizeObserver.disconnect();
       cancelAnimationFrame(animId);
       scene.traverse(object => {
+        if (object instanceof THREE.DirectionalLight) object.shadow.dispose();
         if (object instanceof THREE.Mesh || object instanceof THREE.LineSegments) {
           object.geometry.dispose();
           const materials = Array.isArray(object.material) ? object.material : [object.material];
@@ -152,39 +252,13 @@ export default function FlightViewport({
       renderer.domElement.remove();
       renderer.dispose();
       sceneRef.current = null;
-      ambientLightRef.current = null;
-      sunLightRef.current = null;
       fallbackGroundRef.current = null;
       terrainMeshesRef.current = [];
     };
   }, []);
 
   useEffect(() => {
-    const scene = sceneRef.current;
-    const ambientLight = ambientLightRef.current;
-    const sunLight = sunLightRef.current;
-    if (!scene || !ambientLight || !sunLight || !(scene.fog instanceof THREE.Fog)) return;
-
-    // Solar height follows a simple local 24-hour cycle: sunrise at 06:00, sunset at 18:00.
-    const solarAngle = (simulationTimeMinutes / (24 * 60)) * Math.PI * 2 - Math.PI / 2;
-    const solarHeight = Math.sin(solarAngle);
-    const daylight = THREE.MathUtils.clamp((solarHeight + 0.12) / 0.32, 0, 1);
-    const twilight = 1 - THREE.MathUtils.clamp(Math.abs(solarHeight) * 3, 0, 1);
-    const skyColor = NIGHT_SKY.clone()
-      .lerp(TWILIGHT_SKY, twilight)
-      .lerp(DAY_SKY, daylight);
-
-    scene.background = skyColor;
-    scene.fog.color.copy(skyColor);
-    ambientLight.color.copy(NIGHT_LIGHT).lerp(DAY_LIGHT, daylight);
-    ambientLight.intensity = 0.18 + daylight * 1.02;
-    sunLight.color.copy(TWILIGHT_SKY).lerp(DAY_LIGHT, daylight);
-    sunLight.intensity = 0.08 + daylight * 1.92;
-    sunLight.position.set(
-      Math.cos(solarAngle) * 100,
-      solarHeight * 200,
-      100,
-    );
+    simulationTimeRef.current = simulationTimeMinutes;
   }, [simulationTimeMinutes]);
 
   useEffect(() => {
@@ -249,6 +323,8 @@ export default function FlightViewport({
         });
         const mesh = new THREE.Mesh(geometry, material);
         mesh.rotation.x = -Math.PI / 2;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
         mesh.position.set(
           (terrainGrid.originXFeet +
             (tileColumn + 0.5) * terrainGrid.tileSize * terrainGrid.spacingXFeet) * visualScale,

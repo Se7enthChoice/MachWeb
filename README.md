@@ -113,7 +113,7 @@ Open your browser and navigate to http://localhost:3000.
 
 Configure the start location on the preflight screen before selecting **Start Flight**. The location controls are not available while the simulation is running. Select **End Flight** to return to setup; doing so ends the current flight, and the next start creates a fresh simulation.
 
-Choose an initial time of day on the preflight screen. A real-time 24-hour day/night cycle starts at that time, with sunrise at 06:00 and sunset at 18:00; sky color, lighting, and terrain fog change through the cycle.
+Choose an initial time of day on the preflight screen. A real-time 24-hour day/night cycle starts at that time, with sunrise at 06:00 and sunset at 18:00; sky color, lighting, and terrain fog change through the cycle. Visible sun and moon markers track the aircraft, moonlight illuminates terrain at night, and the sun casts soft terrain shadows during the day.
 
 The simulation advances with the browser animation loop and bounds large frame deltas to keep the flight model stable after pauses or tab switches.
 Pitch, roll, and rudder controls have speed-sensitive response and aerodynamic damping. Bank produces sustained turns; rudder introduces a damped sideslip rather than directly steering the flight path. Vertical speed is limited to ±9,800 ft/min to keep extreme climbs and dives recoverable.
