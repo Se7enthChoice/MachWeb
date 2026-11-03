@@ -1,10 +1,12 @@
-const TERRAIN_ZOOM = 12;
-const TILE_SIZE = 256;
-const TILE_RADIUS = 1;
+const TERRAIN_ZOOM = 12; // Zoom level for terrain tiles (0-15)
+const TILE_SIZE = 256; // 256x256 pixels per tile
+const TILE_COLUMNS = 12; // Four times the original 3-tile terrain width.
+const TILES_BEFORE_CENTER = Math.floor(TILE_COLUMNS / 2);
+const TILES_AFTER_CENTER = TILE_COLUMNS - TILES_BEFORE_CENTER - 1;
 const EARTH_RADIUS_METERS = 6_378_137;
 const FEET_PER_METER = 3.28084;
 const MAX_MERCATOR_LATITUDE = 85.05112878;
-const MAX_CACHED_TILES = 32;
+const MAX_CACHED_TILES = 192;
 
 export interface TerrainOrigin {
   latitude: number;
@@ -13,6 +15,10 @@ export interface TerrainOrigin {
 
 export interface TerrainGrid {
   heightsMeters: Float32Array;
+  satelliteTiles: Array<{ x: number; y: number }>;
+  tileSize: number;
+  tileColumns: number;
+  tileRows: number;
   width: number;
   height: number;
   spacingXFeet: number;
@@ -21,10 +27,12 @@ export interface TerrainGrid {
   originZFeet: number;
 }
 
-interface TileAddress {
+export interface TerrainTileCoordinate {
   x: number;
   y: number;
 }
+
+type TileAddress = TerrainTileCoordinate;
 
 interface TerrainTile {
   elevations: Float32Array;
@@ -75,6 +83,10 @@ function tileKey(address: TileAddress): string {
   return `${TERRAIN_ZOOM}/${address.x}/${address.y}`;
 }
 
+export function getSatelliteTileUrl(tile: TerrainTileCoordinate): string {
+  return `https://e.tiles.maps.eox.at/wmts/1.0.0/s2cloudless_3857/default/GoogleMapsCompatible/${TERRAIN_ZOOM}/${tile.y}/${tile.x}.jpg`;
+}
+
 export function getTerrainNeighborhoodKey(
   origin: TerrainOrigin,
   posXFeet: number,
@@ -83,8 +95,11 @@ export function getTerrainNeighborhoodKey(
   const aircraft = getAircraftCoordinates(origin, posXFeet, posZFeet);
   const address = getTileAddress(aircraft.latitude, aircraft.longitude);
   const tileCount = 2 ** TERRAIN_ZOOM;
-  // Keep the 3x3 neighborhood valid at the north and south edges of Web Mercator.
-  address.y = Math.max(TILE_RADIUS, Math.min(tileCount - TILE_RADIUS - 1, address.y));
+  // Keep the complete neighborhood valid at the north and south Web Mercator edges.
+  address.y = Math.max(
+    TILES_BEFORE_CENTER,
+    Math.min(tileCount - TILES_AFTER_CENTER - 1, address.y),
+  );
   return tileKey(address);
 }
 
@@ -179,14 +194,27 @@ export async function loadTerrainGrid(
   const aircraft = getAircraftCoordinates(origin, posXFeet, posZFeet);
   const center = getTileAddress(aircraft.latitude, aircraft.longitude);
   const tileCount = 2 ** TERRAIN_ZOOM;
-  center.y = Math.max(TILE_RADIUS, Math.min(tileCount - TILE_RADIUS - 1, center.y));
+  center.y = Math.max(
+    TILES_BEFORE_CENTER,
+    Math.min(tileCount - TILES_AFTER_CENTER - 1, center.y),
+  );
 
-  const firstTileX = center.x - TILE_RADIUS;
-  const firstTileY = center.y - TILE_RADIUS;
+  const firstTileX = center.x - TILES_BEFORE_CENTER;
+  const firstTileY = center.y - TILES_BEFORE_CENTER;
+  const satelliteTiles: Array<{ x: number; y: number }> = [];
+  for (let row = 0; row < TILE_COLUMNS; row += 1) {
+    for (let column = 0; column < TILE_COLUMNS; column += 1) {
+      satelliteTiles.push({
+        x: ((firstTileX + column) % tileCount + tileCount) % tileCount,
+        y: firstTileY + row,
+      });
+    }
+  }
+
   const tiles = await Promise.all(
-    Array.from({ length: TILE_RADIUS * 2 + 1 }, (_, row) =>
+    Array.from({ length: TILE_COLUMNS }, (_, row) =>
       Promise.all(
-        Array.from({ length: TILE_RADIUS * 2 + 1 }, (_, column) => {
+        Array.from({ length: TILE_COLUMNS }, (_, column) => {
           const x = ((firstTileX + column) % tileCount + tileCount) % tileCount;
           return loadTile({ x, y: firstTileY + row });
         }),
@@ -194,7 +222,7 @@ export async function loadTerrainGrid(
     ),
   );
 
-  const width = TILE_SIZE * (TILE_RADIUS * 2 + 1);
+  const width = TILE_SIZE * TILE_COLUMNS;
   const height = width;
   const heightsMeters = new Float32Array(width * height);
   for (let tileRow = 0; tileRow < tiles.length; tileRow += 1) {
@@ -224,5 +252,17 @@ export async function loadTerrainGrid(
   const spacingZFeet =
     (localZFeet(latitudeAtPixel(lastPixelY), origin) - originZFeet) / (height - 1);
 
-  return { heightsMeters, width, height, spacingXFeet, spacingZFeet, originXFeet, originZFeet };
+  return {
+    heightsMeters,
+    satelliteTiles,
+    tileSize: TILE_SIZE,
+    tileColumns: TILE_COLUMNS,
+    tileRows: TILE_COLUMNS,
+    width,
+    height,
+    spacingXFeet,
+    spacingZFeet,
+    originXFeet,
+    originZFeet,
+  };
 }

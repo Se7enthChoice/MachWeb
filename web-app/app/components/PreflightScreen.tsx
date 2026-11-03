@@ -5,18 +5,22 @@ import type { ChangeEvent, FormEvent } from 'react';
 interface PreflightScreenProps {
   latitude: string;
   longitude: string;
+  initialTime: string;
   error: string;
   onLatitudeChange(value: string): void;
   onLongitudeChange(value: string): void;
+  onInitialTimeChange(value: string): void;
   onSubmit(event: FormEvent<HTMLFormElement>): void;
 }
 
 export default function PreflightScreen({
   latitude,
   longitude,
+  initialTime,
   error,
   onLatitudeChange,
   onLongitudeChange,
+  onInitialTimeChange,
   onSubmit,
 }: PreflightScreenProps) {
   const handleLatitudeChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -25,6 +29,10 @@ export default function PreflightScreen({
 
   const handleLongitudeChange = (event: ChangeEvent<HTMLInputElement>) => {
     onLongitudeChange(event.target.value);
+  };
+
+  const handleInitialTimeChange = (event: ChangeEvent<HTMLInputElement>) => {
+    onInitialTimeChange(event.target.value);
   };
 
   return (
@@ -79,6 +87,23 @@ export default function PreflightScreen({
             </div>
             <p className="mt-3 text-xs text-zinc-500">
               Initial values: Filton Airfield, Bristol, UK. Enter coordinates to select another area.
+            </p>
+          </div>
+
+          <div className="border-t border-zinc-800 pt-5">
+            <label className="flex max-w-sm flex-col gap-2 text-xs font-bold tracking-wider text-zinc-400">
+              INITIAL TIME OF DAY
+              <input
+                type="time"
+                required
+                value={initialTime}
+                onChange={handleInitialTimeChange}
+                aria-label="Initial time of day"
+                className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-3 text-base font-normal tracking-normal text-zinc-100 outline-none transition focus:border-emerald-500"
+              />
+            </label>
+            <p className="mt-2 text-xs text-zinc-500">
+              The 24-hour day/night cycle starts at this time and advances in real time.
             </p>
           </div>
 

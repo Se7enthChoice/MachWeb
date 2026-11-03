@@ -59,6 +59,9 @@ const DEFAULT_LONGITUDE = -2.5833;
 export default function Home() {
   const [latitudeInput, setLatitudeInput] = useState(String(DEFAULT_LATITUDE));
   const [longitudeInput, setLongitudeInput] = useState(String(DEFAULT_LONGITUDE));
+  const [initialTimeInput, setInitialTimeInput] = useState('12:00');
+  const [flightStartTimeMinutes, setFlightStartTimeMinutes] = useState(12 * 60);
+  const [simulationTimeMinutes, setSimulationTimeMinutes] = useState(12 * 60);
   const [terrainOrigin, setTerrainOrigin] = useState<TerrainOrigin>({
     latitude: DEFAULT_LATITUDE,
     longitude: DEFAULT_LONGITUDE,
@@ -93,21 +96,32 @@ export default function Home() {
     event.preventDefault();
     const latitude = Number(latitudeInput);
     const longitude = Number(longitudeInput);
+    const timeParts = initialTimeInput.split(':').map(Number);
     if (
       !Number.isFinite(latitude) ||
       latitude < -85 ||
       latitude > 85 ||
       !Number.isFinite(longitude) ||
       longitude < -180 ||
-      longitude > 180
+      longitude > 180 ||
+      timeParts.length !== 2 ||
+      !Number.isInteger(timeParts[0]) ||
+      !Number.isInteger(timeParts[1]) ||
+      timeParts[0] < 0 ||
+      timeParts[0] > 23 ||
+      timeParts[1] < 0 ||
+      timeParts[1] > 59
     ) {
-      setSetupError('Enter a valid latitude (-85 to 85) and longitude (-180 to 180).');
+      setSetupError('Enter valid coordinates and a valid initial time of day.');
       return;
     }
 
+    const startTimeMinutes = timeParts[0] * 60 + timeParts[1];
     setSetupError('');
     setTerrainGrid(null);
     setTerrainOrigin({ latitude, longitude });
+    setFlightStartTimeMinutes(startTimeMinutes);
+    setSimulationTimeMinutes(startTimeMinutes);
     setTerrainStatus('waiting for flight dynamics');
     setStatus('Loading flight dynamics...');
     setSimulationStarted(true);
@@ -280,6 +294,20 @@ export default function Home() {
   }, [simulationStarted]);
 
   useEffect(() => {
+    if (!simulationStarted) return;
+
+    const startedAt = Date.now();
+    const updateSimulationTime = () => {
+      const elapsedMinutes = (Date.now() - startedAt) / 60_000;
+      setSimulationTimeMinutes((flightStartTimeMinutes + elapsedMinutes) % (24 * 60));
+    };
+
+    updateSimulationTime();
+    const intervalId = window.setInterval(updateSimulationTime, 1000);
+    return () => window.clearInterval(intervalId);
+  }, [flightStartTimeMinutes, simulationStarted]);
+
+  useEffect(() => {
     latestPositionRef.current = { posX, posZ };
   }, [posX, posZ]);
 
@@ -334,9 +362,11 @@ export default function Home() {
       <PreflightScreen
         latitude={latitudeInput}
         longitude={longitudeInput}
+        initialTime={initialTimeInput}
         error={setupError}
         onLatitudeChange={setLatitudeInput}
         onLongitudeChange={setLongitudeInput}
+        onInitialTimeChange={setInitialTimeInput}
         onSubmit={handleStartFlight}
       />
     );
@@ -387,6 +417,7 @@ export default function Home() {
             stalled={stalled}
             terrainGrid={terrainGrid}
             terrainStatus={terrainStatus}
+            simulationTimeMinutes={simulationTimeMinutes}
           />
         </div>
 
