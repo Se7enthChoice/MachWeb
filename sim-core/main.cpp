@@ -2,6 +2,8 @@
 #include <emscripten/emscripten.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <vector>
 
 class SimEngine {
 private:
@@ -9,6 +11,7 @@ private:
     static constexpr float gravity = 32.174f;
     static constexpr float degreesToRadians = 3.14159265f / 180.0f;
     static constexpr float radiansToDegrees = 180.0f / 3.14159265f;
+    static constexpr float metersToFeet = 3.28084f;
     static constexpr float maxAirspeed = 850.0f;
     static constexpr float maxVerticalSpeed = 9800.0f;
     static constexpr float stallSpeed = 120.0f;
@@ -22,6 +25,13 @@ private:
     float velocityZ = -300.0f * ktsToFeetPerSecond;
     float airspeed = 300.0f;
     float throttle = 0.43f;
+    std::vector<float> terrainHeightsMeters;
+    int terrainWidth = 0;
+    int terrainHeight = 0;
+    float terrainSpacingXFeet = 0.0f;
+    float terrainSpacingZFeet = 0.0f;
+    float terrainOriginXFeet = 0.0f;
+    float terrainOriginZFeet = 0.0f;
 
     float pitchAngle = 0.0f;
     float rollAngle = 0.0f;
@@ -53,6 +63,33 @@ private:
 
     static float clampFinite(float value, float minimum, float maximum) {
         return std::isfinite(value) ? std::clamp(value, minimum, maximum) : minimum;
+    }
+
+    float sampleTerrainMeters(float xFeet, float zFeet) const {
+        if (terrainHeightsMeters.empty()) return 0.0f;
+
+        const float gridX = (xFeet - terrainOriginXFeet) / terrainSpacingXFeet;
+        const float gridZ = (zFeet - terrainOriginZFeet) / terrainSpacingZFeet;
+        if (!std::isfinite(gridX) || !std::isfinite(gridZ) ||
+            gridX < 0.0f || gridZ < 0.0f ||
+            gridX > terrainWidth - 1 || gridZ > terrainHeight - 1) {
+            return 0.0f;
+        }
+
+        // Interpolate the four neighboring raster samples for smooth contact heights.
+        const int x0 = static_cast<int>(gridX);
+        const int z0 = static_cast<int>(gridZ);
+        const int x1 = std::min(x0 + 1, terrainWidth - 1);
+        const int z1 = std::min(z0 + 1, terrainHeight - 1);
+        const float fractionX = gridX - x0;
+        const float fractionZ = gridZ - z0;
+        const float northWest = terrainHeightsMeters[z0 * terrainWidth + x0];
+        const float northEast = terrainHeightsMeters[z0 * terrainWidth + x1];
+        const float southWest = terrainHeightsMeters[z1 * terrainWidth + x0];
+        const float southEast = terrainHeightsMeters[z1 * terrainWidth + x1];
+        const float north = northWest + (northEast - northWest) * fractionX;
+        const float south = southWest + (southEast - southWest) * fractionX;
+        return north + (south - north) * fractionZ;
     }
 
 public:
@@ -187,8 +224,9 @@ public:
             0.0f,
             maxAirspeed);
 
-        if (altitude <= 0.0f && velocityY < 0.0f) {
-            altitude = 0.0f;
+        const float groundElevation = getGroundElevation();
+        if (altitude <= groundElevation && velocityY < 0.0f) {
+            altitude = groundElevation;
             velocityY = 0.0f;
             verticalSpeed = 0.0f;
             pitchAngle = std::max(pitchAngle, 0.0f);
@@ -202,10 +240,46 @@ public:
         if (std::isfinite(value)) throttle = std::clamp(value, 0.0f, 1.0f);
     }
     void setAutoLevel(bool enabled) { autoLevelEnabled = enabled; }
+    bool setTerrainData(unsigned int dataPointer, int width, int height,
+        float spacingXFeet, float spacingZFeet, float originXFeet, float originZFeet) {
+        if (dataPointer == 0 || width < 2 || height < 2 || width > 4096 || height > 4096 ||
+            !std::isfinite(spacingXFeet) || spacingXFeet <= 0.0f ||
+            !std::isfinite(spacingZFeet) || spacingZFeet <= 0.0f ||
+            !std::isfinite(originXFeet) || !std::isfinite(originZFeet)) {
+            return false;
+        }
+
+        const std::size_t sampleCount = static_cast<std::size_t>(width) *
+            static_cast<std::size_t>(height);
+        const float* samples = reinterpret_cast<const float*>(
+            static_cast<std::uintptr_t>(dataPointer));
+        if (!std::all_of(samples, samples + sampleCount,
+                [](float value) { return std::isfinite(value); })) {
+            return false;
+        }
+
+        // Copy once per fetched tile neighborhood; the frame loop only reads the native cache.
+        terrainHeightsMeters.assign(samples, samples + sampleCount);
+        terrainWidth = width;
+        terrainHeight = height;
+        terrainSpacingXFeet = spacingXFeet;
+        terrainSpacingZFeet = spacingZFeet;
+        terrainOriginXFeet = originXFeet;
+        terrainOriginZFeet = originZFeet;
+        return true;
+    }
+    void clearTerrainData() {
+        terrainHeightsMeters.clear();
+        terrainWidth = 0;
+        terrainHeight = 0;
+    }
 
     float getPosX() const { return posX; }
     float getAltitude() const { return altitude; }
     float getPosZ() const { return posZ; }
+    float getGroundElevation() const {
+        return sampleTerrainMeters(posX, posZ) * metersToFeet;
+    }
     float getAirspeed() const { return airspeed; }
     float getThrottle() const { return throttle * 100.0f; }
     float getPitch() const { return pitchAngle; }
@@ -224,9 +298,12 @@ EMSCRIPTEN_BINDINGS(sim_engine) {
         .function("setYawInput", &SimEngine::setYawInput)
         .function("setThrottle", &SimEngine::setThrottle)
         .function("setAutoLevel", &SimEngine::setAutoLevel)
+        .function("setTerrainData", &SimEngine::setTerrainData)
+        .function("clearTerrainData", &SimEngine::clearTerrainData)
         .function("getPosX", &SimEngine::getPosX)
         .function("getAltitude", &SimEngine::getAltitude)
         .function("getPosZ", &SimEngine::getPosZ)
+        .function("getGroundElevation", &SimEngine::getGroundElevation)
         .function("getAirspeed", &SimEngine::getAirspeed)
         .function("getThrottle", &SimEngine::getThrottle)
         .function("getPitch", &SimEngine::getPitch)

@@ -1,7 +1,14 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import type { FormEvent } from 'react';
 import FlightViewport from './components/FlightViewport';
+import PreflightScreen from './components/PreflightScreen';
+import {
+  getTerrainNeighborhoodKey,
+  loadTerrainGrid,
+} from './terrain';
+import type { TerrainGrid, TerrainOrigin } from './terrain';
 
 interface SimEngineInstance {
   tick(dt: number): void;
@@ -10,9 +17,20 @@ interface SimEngineInstance {
   setYawInput(value: number): void;
   setThrottle(value: number): void;
   setAutoLevel(enabled: boolean): void;
+  setTerrainData(
+    dataPointer: number,
+    width: number,
+    height: number,
+    spacingXFeet: number,
+    spacingZFeet: number,
+    originXFeet: number,
+    originZFeet: number,
+  ): boolean;
+  clearTerrainData(): void;
   getPosX(): number;
   getAltitude(): number;
   getPosZ(): number;
+  getGroundElevation(): number;
   getAirspeed(): number;
   getThrottle(): number;
   getPitch(): number;
@@ -25,14 +43,33 @@ interface SimEngineInstance {
 
 interface SimEngineModule {
   SimEngine: new () => SimEngineInstance;
+  HEAPF32: Float32Array;
+  _malloc(byteLength: number): number;
+  _free(pointer: number): void;
 }
 
 type SimEngineModuleFactory = (options: {
   locateFile(path: string): string;
 }) => Promise<SimEngineModule>;
 
+// Filton Airfield, Bristol, UK
+const DEFAULT_LATITUDE = 51.5000;
+const DEFAULT_LONGITUDE = -2.5833;
+
 export default function Home() {
+  const [latitudeInput, setLatitudeInput] = useState(String(DEFAULT_LATITUDE));
+  const [longitudeInput, setLongitudeInput] = useState(String(DEFAULT_LONGITUDE));
+  const [terrainOrigin, setTerrainOrigin] = useState<TerrainOrigin>({
+    latitude: DEFAULT_LATITUDE,
+    longitude: DEFAULT_LONGITUDE,
+  });
+  const [terrainGrid, setTerrainGrid] = useState<TerrainGrid | null>(null);
+  const [terrainStatus, setTerrainStatus] = useState('waiting for flight dynamics');
+  const [setupError, setSetupError] = useState('');
+  const [simulationStarted, setSimulationStarted] = useState(false);
+  const [flightReady, setFlightReady] = useState(false);
   const [altitude, setAltitude] = useState<number>(5000);
+  const [groundElevation, setGroundElevation] = useState<number>(0);
   const [airspeed, setAirspeed] = useState<number>(300);
   const [throttle, setThrottle] = useState<number>(43);
   const [pitch, setPitch] = useState<number>(0);
@@ -47,6 +84,53 @@ export default function Home() {
 
   const throttleRef = useRef(0.43);
   const autoLevelRef = useRef(false);
+  const engineRef = useRef<SimEngineInstance | null>(null);
+  const wasmModuleRef = useRef<SimEngineModule | null>(null);
+  const latestPositionRef = useRef({ posX, posZ });
+  const terrainNeighborhoodKey = getTerrainNeighborhoodKey(terrainOrigin, posX, posZ);
+
+  const handleStartFlight = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const latitude = Number(latitudeInput);
+    const longitude = Number(longitudeInput);
+    if (
+      !Number.isFinite(latitude) ||
+      latitude < -85 ||
+      latitude > 85 ||
+      !Number.isFinite(longitude) ||
+      longitude < -180 ||
+      longitude > 180
+    ) {
+      setSetupError('Enter a valid latitude (-85 to 85) and longitude (-180 to 180).');
+      return;
+    }
+
+    setSetupError('');
+    setTerrainGrid(null);
+    setTerrainOrigin({ latitude, longitude });
+    setTerrainStatus('waiting for flight dynamics');
+    setStatus('Loading flight dynamics...');
+    setSimulationStarted(true);
+  };
+
+  const handleEndFlight = () => {
+    setSimulationStarted(false);
+    setFlightReady(false);
+    setTerrainGrid(null);
+    setTerrainStatus('waiting for flight dynamics');
+    setStatus('Ready for pre-flight setup');
+    setPosX(0);
+    setPosZ(0);
+    setAltitude(5000);
+    setGroundElevation(0);
+    setAirspeed(300);
+    setThrottle(43);
+    setPitch(0);
+    setRoll(0);
+    setHeading(0);
+    setVSpeed(0);
+    setStalled(false);
+  };
 
   const toggleAutoLevel = () => {
     const nextVal = !autoLevel;
@@ -55,6 +139,8 @@ export default function Home() {
   };
 
   useEffect(() => {
+    if (!simulationStarted) return;
+
     let animationFrameId = 0;
     let disposed = false;
     let engineInstance: SimEngineInstance | null = null;
@@ -96,8 +182,11 @@ export default function Home() {
         if (disposed) return;
 
         engineInstance = new wasmModule.SimEngine();
+        engineRef.current = engineInstance;
+        wasmModuleRef.current = wasmModule;
         engineInstance.setAutoLevel(autoLevelRef.current);
         setStatus('Flight dynamics online - 6DOF');
+        setFlightReady(true);
 
         let lastTime = performance.now();
 
@@ -138,6 +227,7 @@ export default function Home() {
               engineInstance.getPosX(),
               engineInstance.getAltitude(),
               engineInstance.getPosZ(),
+              engineInstance.getGroundElevation(),
               engineInstance.getAirspeed(),
               engineInstance.getThrottle(),
               engineInstance.getPitch(),
@@ -150,11 +240,12 @@ export default function Home() {
               return;
             }
 
-            const [nextPosX, nextAltitude, nextPosZ, nextAirspeed, nextThrottle,
-              nextPitch, nextRoll, nextHeading, nextVSpeed] = telemetry;
+            const [nextPosX, nextAltitude, nextPosZ, nextGroundElevation,
+              nextAirspeed, nextThrottle, nextPitch, nextRoll, nextHeading, nextVSpeed] = telemetry;
             setPosX(nextPosX);
             setAltitude(nextAltitude);
             setPosZ(nextPosZ);
+            setGroundElevation(nextGroundElevation);
             setAirspeed(nextAirspeed);
             setThrottle(nextThrottle);
             setPitch(nextPitch);
@@ -183,8 +274,73 @@ export default function Home() {
       window.removeEventListener('blur', handleBlur);
       cancelAnimationFrame(animationFrameId);
       engineInstance?.delete();
+      engineRef.current = null;
+      wasmModuleRef.current = null;
     };
-  }, []);
+  }, [simulationStarted]);
+
+  useEffect(() => {
+    latestPositionRef.current = { posX, posZ };
+  }, [posX, posZ]);
+
+  useEffect(() => {
+    const engine = engineRef.current;
+    const wasmModule = wasmModuleRef.current;
+    if (!flightReady || !engine || !wasmModule) return;
+
+    let cancelled = false;
+    setTerrainStatus('loading elevation tiles');
+    const requestPosition = latestPositionRef.current;
+    loadTerrainGrid(terrainOrigin, requestPosition.posX, requestPosition.posZ)
+      .then(grid => {
+        if (cancelled) return;
+
+        const pointer = wasmModule._malloc(grid.heightsMeters.byteLength);
+        if (pointer === 0) throw new Error('Could not allocate Wasm memory for terrain data.');
+        try {
+          // Upload the raster once per tile neighborhood; native physics samples its own cache.
+          wasmModule.HEAPF32.set(grid.heightsMeters, pointer / Float32Array.BYTES_PER_ELEMENT);
+          const accepted = engine.setTerrainData(
+            pointer,
+            grid.width,
+            grid.height,
+            grid.spacingXFeet,
+            grid.spacingZFeet,
+            grid.originXFeet,
+            grid.originZFeet,
+          );
+          if (!accepted) throw new Error('The Wasm flight model rejected the terrain heightmap.');
+        } finally {
+          wasmModule._free(pointer);
+        }
+
+        setTerrainGrid(grid);
+        setTerrainStatus('ready');
+      })
+      .catch(error => {
+        if (cancelled) return;
+        console.error('Failed to load terrain data:', error);
+        const message = error instanceof Error ? error.message : String(error);
+        setTerrainStatus(`unavailable: ${message}`);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [flightReady, terrainOrigin, terrainNeighborhoodKey]);
+
+  if (!simulationStarted) {
+    return (
+      <PreflightScreen
+        latitude={latitudeInput}
+        longitude={longitudeInput}
+        error={setupError}
+        onLatitudeChange={setLatitudeInput}
+        onLongitudeChange={setLongitudeInput}
+        onSubmit={handleStartFlight}
+      />
+    );
+  }
 
   return (
     <main className="flex min-h-screen flex-col items-stretch justify-start bg-zinc-950 p-3 font-mono text-zinc-100 sm:p-5">
@@ -194,11 +350,11 @@ export default function Home() {
         <div className="mb-4 flex items-center justify-between border-b border-zinc-800 pb-3">
           <div>
             <h1 className="text-xl font-bold tracking-wider text-emerald-400">
-              MACHWEB // FIRST-PERSON FLIGHT
+              MACHWEB
             </h1>
             <p className="text-xs text-zinc-400 mt-1">{status}</p>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-4">
             <button
               onClick={toggleAutoLevel}
               className={`px-3 py-1.5 rounded text-xs font-bold border transition-colors ${
@@ -209,10 +365,12 @@ export default function Home() {
             >
               FLIGHT ASSIST (L): {autoLevel ? 'ON' : 'OFF'}
             </button>
-            <div className="text-right text-xs text-zinc-500">
-              <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse mr-2"></span>
-              6DOF // WASM
-            </div>
+            <button
+              onClick={handleEndFlight}
+              className="rounded border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs font-bold text-zinc-300 transition-colors hover:border-red-500/50 hover:bg-red-950/40 hover:text-red-300"
+            >
+              END FLIGHT
+            </button>
           </div>
         </div>
 
@@ -227,11 +385,13 @@ export default function Home() {
             heading={heading}
             airspeed={airspeed}
             stalled={stalled}
+            terrainGrid={terrainGrid}
+            terrainStatus={terrainStatus}
           />
         </div>
 
         {/* Instruments */}
-        <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
+        <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-5 sm:gap-4">
           <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 text-center">
             <span className="text-xs text-zinc-500 uppercase tracking-widest block mb-1">Airspeed</span>
             <span className="text-2xl font-bold text-zinc-100">{airspeed.toFixed(0)}</span>
@@ -241,6 +401,12 @@ export default function Home() {
           <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 text-center">
             <span className="text-xs text-zinc-500 uppercase tracking-widest block mb-1">Altitude</span>
             <span className="text-2xl font-bold text-emerald-400">{altitude.toFixed(0)}</span>
+            <span className="text-xs text-zinc-600 block mt-1">FEET MSL</span>
+          </div>
+
+          <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 text-center">
+            <span className="text-xs text-zinc-500 uppercase tracking-widest block mb-1">Ground</span>
+            <span className="text-2xl font-bold text-zinc-100">{groundElevation.toFixed(0)}</span>
             <span className="text-xs text-zinc-600 block mt-1">FEET MSL</span>
           </div>
 

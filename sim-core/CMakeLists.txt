@@ -11,6 +11,8 @@ target_link_options(sim-core PRIVATE
     "-sMODULARIZE=1"
     "-sEXPORT_ES6=1"
     "-sENVIRONMENT=web"
+    "-sEXPORTED_FUNCTIONS=['_malloc','_free']"
+    "-sEXPORTED_RUNTIME_METHODS=['HEAPF32']"
     "--bind"
     "-O3" # Optimization level for performance
 )
