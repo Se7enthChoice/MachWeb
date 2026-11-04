@@ -629,6 +629,10 @@ export default function FlightViewport({
       : terrainGrid
         ? 'loading'
         : 'waiting';
+  const resourceErrors = [
+    terrainStatus.startsWith('unavailable:') ? `TERRAIN ${terrainStatus}` : '',
+    imageryStatus.startsWith('partial') ? `SATELLITE ${imageryStatus}` : '',
+  ].filter(Boolean);
 
   return (
     <div className="relative h-[58vh] min-h-80 max-h-224 w-full overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 shadow-inner sm:h-[70vh]">
@@ -640,9 +644,11 @@ export default function FlightViewport({
       <div className="pointer-events-none absolute left-3 top-3 rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 font-mono text-xs text-emerald-300 backdrop-blur">
         MACHWEB
       </div>
-      <div className="pointer-events-none absolute left-3 top-10 max-w-[70%] break-all rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 font-mono text-xs text-zinc-300 backdrop-blur">
-        TERRAIN {terrainStatus} · SATELLITE {imageryStatus}
-      </div>
+      {resourceErrors.length > 0 && (
+        <div className="pointer-events-none absolute left-3 top-10 max-w-[70%] break-all rounded border border-red-500/60 bg-red-950/85 px-2 py-1 font-mono text-xs text-red-300 backdrop-blur">
+          {resourceErrors.join(' · ')}
+        </div>
+      )}
       <div className="pointer-events-none absolute right-3 top-3 rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 font-mono text-xs text-zinc-200 backdrop-blur">
         LOCAL TIME {Math.floor(simulationTimeMinutes / 60).toString().padStart(2, '0')}:
         {Math.floor(simulationTimeMinutes % 60).toString().padStart(2, '0')}

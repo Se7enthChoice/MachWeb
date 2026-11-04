@@ -50,7 +50,6 @@ private:
     float pitchInput = 0.0f;
     float rollInput = 0.0f;
     float yawInput = 0.0f;
-    bool autoLevelEnabled = false;
 
     static float clampInput(float value) {
         return std::isfinite(value) ? std::clamp(value, -1.0f, 1.0f) : 0.0f;
@@ -190,37 +189,23 @@ public:
         const float pitchDynamicPressure = std::pow(
             std::clamp(airspeed / cruiseAirspeed, 0.0f, 1.35f), 2.0f);
         const float controlAuthority = std::clamp(airspeed / cruiseAirspeed, 0.35f, 1.35f);
-        const float maxPitchRate = 55.0f * controlAuthority;
         const float maxRollRate = 100.0f * controlAuthority;
         const float maxYawRate = 10.0f * controlAuthority;
-        float targetPitchRate = 0.0f;
         float targetRollRate = rollInput * maxRollRate;
         const float targetYawRate = yawInput * maxYawRate;
-        if (autoLevelEnabled) {
-            if (std::abs(pitchInput) < 0.01f) {
-                targetPitchRate = std::clamp(-pitchAngle * 1.5f, -maxPitchRate, maxPitchRate);
-            }
-            if (std::abs(rollInput) < 0.01f) {
-                targetRollRate = std::clamp(-rollAngle * 2.0f, -maxRollRate, maxRollRate);
-            }
-        }
 
-        if (autoLevelEnabled && std::abs(pitchInput) < 0.01f) {
-            pitchRate += (targetPitchRate - pitchRate) * std::min(4.0f * dt, 1.0f);
-        } else {
-            const float highAngleOfAttack = std::max(std::abs(angleOfAttackDegrees) - 12.0f, 0.0f);
-            const float elevatorEffectiveness = std::clamp(
-                1.0f - highAngleOfAttack / 24.0f, 0.15f, 1.0f);
-            const float pitchAcceleration =
-                pitchInput * 120.0f * pitchDynamicPressure * elevatorEffectiveness;
-            float aerodynamicPitchingMoment =
-                -angleOfAttackDegrees * 0.12f * pitchDynamicPressure;
-            if (pitchInput * aerodynamicPitchingMoment > 0.0f) {
-                aerodynamicPitchingMoment = 0.0f;
-            }
-            pitchRate += (pitchAcceleration + aerodynamicPitchingMoment -
-                pitchRate * (1.5f + pitchDynamicPressure)) * dt;
+        const float highAngleOfAttack = std::max(std::abs(angleOfAttackDegrees) - 12.0f, 0.0f);
+        const float elevatorEffectiveness = std::clamp(
+            1.0f - highAngleOfAttack / 24.0f, 0.15f, 1.0f);
+        const float pitchAcceleration =
+            pitchInput * 120.0f * pitchDynamicPressure * elevatorEffectiveness;
+        float aerodynamicPitchingMoment =
+            -angleOfAttackDegrees * 0.12f * pitchDynamicPressure;
+        if (pitchInput * aerodynamicPitchingMoment > 0.0f) {
+            aerodynamicPitchingMoment = 0.0f;
         }
+        pitchRate += (pitchAcceleration + aerodynamicPitchingMoment -
+            pitchRate * (1.5f + pitchDynamicPressure)) * dt;
         rollRate += (targetRollRate - rollRate) * std::min(5.0f * dt, 1.0f);
         yawRate += (targetYawRate - yawRate) * std::min(4.0f * dt, 1.0f);
 
@@ -342,7 +327,6 @@ public:
     void setThrottle(float value) {
         if (std::isfinite(value)) throttle = std::clamp(value, 0.0f, 1.0f);
     }
-    void setAutoLevel(bool enabled) { autoLevelEnabled = enabled; }
     bool setTerrainData(unsigned int dataPointer, int width, int height,
         float spacingXFeet, float spacingZFeet, float originXFeet, float originZFeet) {
         if (dataPointer == 0 || width < 2 || height < 2 || width > 4096 || height > 4096 ||
@@ -400,7 +384,6 @@ EMSCRIPTEN_BINDINGS(sim_engine) {
         .function("setRollInput", &SimEngine::setRollInput)
         .function("setYawInput", &SimEngine::setYawInput)
         .function("setThrottle", &SimEngine::setThrottle)
-        .function("setAutoLevel", &SimEngine::setAutoLevel)
         .function("setTerrainData", &SimEngine::setTerrainData)
         .function("clearTerrainData", &SimEngine::clearTerrainData)
         .function("getPosX", &SimEngine::getPosX)

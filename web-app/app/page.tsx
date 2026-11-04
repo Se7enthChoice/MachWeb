@@ -26,7 +26,6 @@ interface SimEngineInstance {
   setRollInput(value: number): void;
   setYawInput(value: number): void;
   setThrottle(value: number): void;
-  setAutoLevel(enabled: boolean): void;
   setTerrainData(
     dataPointer: number,
     width: number,
@@ -76,9 +75,9 @@ function formatTimeOfDay(totalMinutes: number): string {
 export default function Home() {
   const [latitudeInput, setLatitudeInput] = useState(String(DEFAULT_LATITUDE));
   const [longitudeInput, setLongitudeInput] = useState(String(DEFAULT_LONGITUDE));
-  const [initialTimeInput, setInitialTimeInput] = useState('12:00');
-  const [flightStartTimeMinutes, setFlightStartTimeMinutes] = useState(12 * 60);
-  const [simulationTimeMinutes, setSimulationTimeMinutes] = useState(12 * 60);
+  const [initialTimeInput, setInitialTimeInput] = useState('');
+  const [flightStartTimeMinutes, setFlightStartTimeMinutes] = useState(0);
+  const [simulationTimeMinutes, setSimulationTimeMinutes] = useState(0);
   const simulationTimeRef = useRef(simulationTimeMinutes);
   const [terrainOrigin, setTerrainOrigin] = useState<TerrainOrigin>({
     latitude: DEFAULT_LATITUDE,
@@ -108,11 +107,9 @@ export default function Home() {
   const [stalled, setStalled] = useState(false);
   const [posX, setPosX] = useState<number>(0);
   const [posZ, setPosZ] = useState<number>(0);
-  const [autoLevel, setAutoLevel] = useState(false);
   const [status, setStatus] = useState<string>('Initializing flight dynamics...');
 
   const throttleRef = useRef(0.43);
-  const autoLevelRef = useRef(false);
   const engineRef = useRef<SimEngineInstance | null>(null);
   const wasmModuleRef = useRef<SimEngineModule | null>(null);
   const latestPositionRef = useRef({ posX, posZ });
@@ -201,7 +198,9 @@ export default function Home() {
         session.id === sessionId ? { ...session, status: 'connected' } : session,
       ));
       refreshConnectedPeers();
-      if (role === 'host') {
+      if (role === 'join') {
+        setMultiplayerStatus('Connected to host.');
+      } else {
         const timeParts = initialTimeInput.split(':').map(Number);
         const selectedTime = timeParts[0] * 60 + timeParts[1];
         sendHostTime(channel, simulationStarted ? simulationTimeRef.current : selectedTime);
@@ -471,15 +470,21 @@ export default function Home() {
     setStalled(false);
   };
 
-  const toggleAutoLevel = () => {
-    const nextVal = !autoLevel;
-    setAutoLevel(nextVal);
-    autoLevelRef.current = nextVal;
-  };
-
   useEffect(() => () => {
     dataChannelsRef.current.forEach(channel => channel.close());
     peerConnectionsRef.current.forEach(connection => connection.close());
+  }, []);
+
+  useEffect(() => {
+    const now = new Date();
+    const currentTimeMinutes = now.getHours() * 60 + now.getMinutes();
+    const timeoutId = window.setTimeout(() => {
+      setInitialTimeInput(formatTimeOfDay(currentTimeMinutes));
+      setFlightStartTimeMinutes(currentTimeMinutes);
+      setSimulationTimeMinutes(currentTimeMinutes);
+      simulationTimeRef.current = currentTimeMinutes;
+    }, 0);
+    return () => window.clearTimeout(timeoutId);
   }, []);
 
   useEffect(() => {
@@ -492,15 +497,6 @@ export default function Home() {
     const keysPressed = new Set<string>();
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.code === 'KeyL' && !event.repeat) {
-        setAutoLevel(prev => {
-          const next = !prev;
-          autoLevelRef.current = next;
-          if (engineInstance) engineInstance.setAutoLevel(next);
-          return next;
-        });
-        return;
-      }
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.code)) {
         event.preventDefault();
       }
@@ -528,8 +524,7 @@ export default function Home() {
         engineInstance = new wasmModule.SimEngine();
         engineRef.current = engineInstance;
         wasmModuleRef.current = wasmModule;
-        engineInstance.setAutoLevel(autoLevelRef.current);
-        setStatus('Flight dynamics online - 6DOF');
+        setStatus('');
         setFlightReady(true);
 
         let lastTime = performance.now();
@@ -560,7 +555,6 @@ export default function Home() {
               throttleRef.current = Math.max(0.0, throttleRef.current - 0.4 * clampedDt);
             }
 
-            engineInstance.setAutoLevel(autoLevelRef.current);
             engineInstance.setPitchInput(pitchInput);
             engineInstance.setRollInput(rollInput);
             engineInstance.setYawInput(yawInput);
@@ -773,22 +767,12 @@ export default function Home() {
             <h1 className="text-xl font-bold tracking-wider text-emerald-400">
               MACHWEB
             </h1>
-            <p className="text-xs text-zinc-400 mt-1">{status}</p>
+            {status && <p className="mt-1 text-xs text-zinc-400">{status}</p>}
             {multiplayerRole !== 'solo' && (
               <p className="mt-1 text-xs text-emerald-300">{multiplayerStatus}</p>
             )}
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-4">
-            <button
-              onClick={toggleAutoLevel}
-              className={`px-3 py-1.5 rounded text-xs font-bold border transition-colors ${
-                autoLevel
-                  ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/50'
-                  : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:text-zinc-200'
-              }`}
-            >
-              FLIGHT ASSIST (L): {autoLevel ? 'ON' : 'OFF'}
-            </button>
             <button
               onClick={handleEndFlight}
               className="rounded border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs font-bold text-zinc-300 transition-colors hover:border-red-500/50 hover:bg-red-950/40 hover:text-red-300"
@@ -818,19 +802,7 @@ export default function Home() {
         </div>
 
         {/* Instruments */}
-        <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-5 sm:gap-4">
-          <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 text-center">
-            <span className="text-xs text-zinc-500 uppercase tracking-widest block mb-1">Airspeed</span>
-            <span className="text-2xl font-bold text-zinc-100">{airspeed.toFixed(0)}</span>
-            <span className="text-xs text-zinc-600 block mt-1">KNOTS</span>
-          </div>
-
-          <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 text-center">
-            <span className="text-xs text-zinc-500 uppercase tracking-widest block mb-1">Altitude</span>
-            <span className="text-2xl font-bold text-emerald-400">{altitude.toFixed(0)}</span>
-            <span className="text-xs text-zinc-600 block mt-1">FEET MSL</span>
-          </div>
-
+        <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
           <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 text-center">
             <span className="text-xs text-zinc-500 uppercase tracking-widest block mb-1">Ground</span>
             <span className="text-2xl font-bold text-zinc-100">{groundElevation.toFixed(0)}</span>
@@ -847,21 +819,14 @@ export default function Home() {
           </div>
 
           <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 text-center">
-            <span className="text-xs text-zinc-500 uppercase tracking-widest block mb-1">Heading</span>
-            <span className="text-2xl font-bold text-zinc-100">{heading.toFixed(0)}°</span>
-            <span className="text-xs text-zinc-600 block mt-1">COMPASS</span>
+            <span className="text-xs text-zinc-500 uppercase tracking-widest block mb-1">Throttle Setting</span>
+            <span className="text-2xl font-bold text-amber-400">{throttle.toFixed(0)}%</span>
           </div>
-        </div>
 
-        {/* Secondary Telemetry */}
-        <div className="grid grid-cols-2 gap-4 mb-6">
-          <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 flex justify-between items-center px-4">
-            <span className="text-xs text-zinc-400">THROTTLE SETTING</span>
-            <span className="text-lg font-bold text-amber-400">{throttle.toFixed(0)}%</span>
-          </div>
-          <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 flex justify-between items-center px-4">
-            <span className="text-xs text-zinc-400">VERTICAL SPEED</span>
-            <span className="text-lg font-bold text-zinc-200">{vSpeed.toFixed(0)} FT/MIN</span>
+          <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 text-center">
+            <span className="text-xs text-zinc-500 uppercase tracking-widest block mb-1">Vertical Speed</span>
+            <span className="text-2xl font-bold text-zinc-200">{vSpeed.toFixed(0)}</span>
+            <span className="text-xs text-zinc-600 block mt-1">FT/MIN</span>
           </div>
         </div>
 
@@ -873,7 +838,6 @@ export default function Home() {
             <div><strong className="text-emerald-400">A / D</strong>: Bank for turns</div>
             <div><strong className="text-emerald-400">Q / E</strong>: Rudder yaw / sideslip</div>
             <div><strong className="text-emerald-400">SHIFT / CTRL</strong>: Throttle up / down</div>
-            <div><strong className="text-emerald-400">L</strong> (or button): Toggle flight assist</div>
           </div>
         </div>
       </div>

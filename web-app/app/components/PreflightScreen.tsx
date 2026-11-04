@@ -275,9 +275,6 @@ export default function PreflightScreen({
             START FLIGHT
           </button>
         </form>
-        <div className="border-t border-zinc-800 px-6 py-3 text-center text-[10px] tracking-wider text-zinc-600 sm:px-10">
-          LOCATION SETTINGS ARE LOCKED WHILE THE SIMULATION IS RUNNING
-        </div>
       </section>
     </main>
   );
