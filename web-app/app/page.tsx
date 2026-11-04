@@ -4,11 +4,21 @@ import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import FlightViewport from './components/FlightViewport';
 import PreflightScreen from './components/PreflightScreen';
+import type { HostPeerSession } from './components/PreflightScreen';
 import {
+  getAircraftCoordinates,
   getTerrainNeighborhoodKey,
   loadTerrainGrid,
 } from './terrain';
 import type { TerrainGrid, TerrainOrigin } from './terrain';
+import {
+  decodeSessionDescription,
+  encodeSessionDescription,
+  parseFlightTimeMessage,
+  parseFlightTelemetryMessage,
+  waitForIceGatheringComplete,
+} from './webrtc';
+import type { FlightTelemetry } from './webrtc';
 
 interface SimEngineInstance {
   tick(dt: number): void;
@@ -56,12 +66,20 @@ type SimEngineModuleFactory = (options: {
 const DEFAULT_LATITUDE = 51.5000;
 const DEFAULT_LONGITUDE = -2.5833;
 
+function formatTimeOfDay(totalMinutes: number): string {
+  const wholeMinutes = Math.floor(totalMinutes) % (24 * 60);
+  const hours = Math.floor(wholeMinutes / 60);
+  const minutes = wholeMinutes % 60;
+  return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+}
+
 export default function Home() {
   const [latitudeInput, setLatitudeInput] = useState(String(DEFAULT_LATITUDE));
   const [longitudeInput, setLongitudeInput] = useState(String(DEFAULT_LONGITUDE));
   const [initialTimeInput, setInitialTimeInput] = useState('12:00');
   const [flightStartTimeMinutes, setFlightStartTimeMinutes] = useState(12 * 60);
   const [simulationTimeMinutes, setSimulationTimeMinutes] = useState(12 * 60);
+  const simulationTimeRef = useRef(simulationTimeMinutes);
   const [terrainOrigin, setTerrainOrigin] = useState<TerrainOrigin>({
     latitude: DEFAULT_LATITUDE,
     longitude: DEFAULT_LONGITUDE,
@@ -69,6 +87,14 @@ export default function Home() {
   const [terrainGrid, setTerrainGrid] = useState<TerrainGrid | null>(null);
   const [terrainStatus, setTerrainStatus] = useState('waiting for flight dynamics');
   const [setupError, setSetupError] = useState('');
+  const [multiplayerRole, setMultiplayerRole] = useState<'solo' | 'host' | 'join'>('solo');
+  const [multiplayerStatus, setMultiplayerStatus] = useState('Solo flight');
+  const [multiplayerBusy, setMultiplayerBusy] = useState(false);
+  const [multiplayerConnected, setMultiplayerConnected] = useState(false);
+  const [localDescription, setLocalDescription] = useState('');
+  const [remoteDescription, setRemoteDescription] = useState('');
+  const [hostPeerSessions, setHostPeerSessions] = useState<HostPeerSession[]>([]);
+  const [remoteTelemetryByPlayer, setRemoteTelemetryByPlayer] = useState<Record<string, FlightTelemetry>>({});
   const [simulationStarted, setSimulationStarted] = useState(false);
   const [flightReady, setFlightReady] = useState(false);
   const [altitude, setAltitude] = useState<number>(5000);
@@ -90,10 +116,301 @@ export default function Home() {
   const engineRef = useRef<SimEngineInstance | null>(null);
   const wasmModuleRef = useRef<SimEngineModule | null>(null);
   const latestPositionRef = useRef({ posX, posZ });
+  const peerConnectionsRef = useRef(new Map<string, RTCPeerConnection>());
+  const dataChannelsRef = useRef(new Map<string, RTCDataChannel>());
+  const peerPlayersRef = useRef(new Map<string, Set<string>>());
+  const multiplayerOperationRef = useRef(false);
+  const hostTimeSequenceRef = useRef(0);
+  const playerIdRef = useRef('');
+  const telemetrySequenceRef = useRef(0);
   const terrainNeighborhoodKey = getTerrainNeighborhoodKey(terrainOrigin, posX, posZ);
+
+  const refreshConnectedPeers = () => {
+    const connectedCount = Array.from(dataChannelsRef.current.values())
+      .filter(channel => channel.readyState === 'open').length;
+    setMultiplayerConnected(connectedCount > 0);
+    if (multiplayerRole === 'host') {
+      setMultiplayerStatus(
+        connectedCount === 0
+          ? 'No joiners connected. Create an offer for each player.'
+          : `${connectedCount} joiner${connectedCount === 1 ? '' : 's'} connected. The host relays flight data.`,
+      );
+    }
+  };
+
+  const sendHostTime = (channel: RTCDataChannel, minutes: number) => {
+    if (channel.readyState !== 'open') return;
+    const sequence = hostTimeSequenceRef.current;
+    hostTimeSequenceRef.current += 1;
+    try {
+      channel.send(JSON.stringify({ type: 'flight-time', minutes, sequence }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setMultiplayerStatus(`Could not sync host time: ${message}`);
+    }
+  };
+
+  const closePeerConnections = () => {
+    dataChannelsRef.current.forEach(channel => channel.close());
+    peerConnectionsRef.current.forEach(connection => connection.close());
+    dataChannelsRef.current.clear();
+    peerConnectionsRef.current.clear();
+    peerPlayersRef.current.clear();
+    setRemoteTelemetryByPlayer({});
+    setHostPeerSessions([]);
+    setMultiplayerConnected(false);
+  };
+
+  const configurePeerConnection = (
+    connection: RTCPeerConnection,
+    sessionId: string,
+    role: 'host' | 'join',
+  ) => {
+    connection.onconnectionstatechange = () => {
+      if (peerConnectionsRef.current.get(sessionId) !== connection) return;
+      if (connection.connectionState === 'connected') {
+        setHostPeerSessions(sessions => sessions.map(session =>
+          session.id === sessionId ? { ...session, status: 'connected' } : session,
+        ));
+      } else if (connection.connectionState === 'failed') {
+        setHostPeerSessions(sessions => sessions.map(session =>
+          session.id === sessionId ? { ...session, status: 'connection failed' } : session,
+        ));
+        if (role === 'join') setMultiplayerStatus('Connection failed. This network may require a TURN relay.');
+      } else if (connection.connectionState === 'disconnected') {
+        setHostPeerSessions(sessions => sessions.map(session =>
+          session.id === sessionId ? { ...session, status: 'disconnected' } : session,
+        ));
+      }
+    };
+  };
+
+  const configureDataChannel = (
+    channel: RTCDataChannel,
+    sessionId: string,
+    role: 'host' | 'join',
+  ) => {
+    const lastReceivedSequences = new Map<string, number>();
+    let lastReceivedTimeSequence = -1;
+    let receivedHostTelemetry = false;
+    dataChannelsRef.current.set(sessionId, channel);
+    peerPlayersRef.current.set(sessionId, new Set());
+    channel.onopen = () => {
+      if (dataChannelsRef.current.get(sessionId) !== channel) return;
+      setHostPeerSessions(sessions => sessions.map(session =>
+        session.id === sessionId ? { ...session, status: 'connected' } : session,
+      ));
+      refreshConnectedPeers();
+      if (role === 'host') {
+        const timeParts = initialTimeInput.split(':').map(Number);
+        const selectedTime = timeParts[0] * 60 + timeParts[1];
+        sendHostTime(channel, simulationStarted ? simulationTimeRef.current : selectedTime);
+      }
+    };
+    channel.onclose = () => {
+      if (dataChannelsRef.current.get(sessionId) !== channel) return;
+      dataChannelsRef.current.delete(sessionId);
+      peerConnectionsRef.current.get(sessionId)?.close();
+      peerConnectionsRef.current.delete(sessionId);
+      const playerIds = peerPlayersRef.current.get(sessionId) ?? new Set<string>();
+      peerPlayersRef.current.delete(sessionId);
+      setRemoteTelemetryByPlayer(current => {
+        const next = { ...current };
+        playerIds.forEach(playerId => delete next[playerId]);
+        return next;
+      });
+      setHostPeerSessions(sessions => sessions.map(session =>
+        session.id === sessionId ? { ...session, status: 'disconnected' } : session,
+      ));
+      refreshConnectedPeers();
+    };
+    channel.onerror = () => {
+      setHostPeerSessions(sessions => sessions.map(session =>
+        session.id === sessionId ? { ...session, status: 'data channel error' } : session,
+      ));
+    };
+    channel.onmessage = event => {
+      if (dataChannelsRef.current.get(sessionId) !== channel) return;
+      if (typeof event.data !== 'string' || event.data.length > 16_384) {
+        setMultiplayerStatus('Received an unsupported multiplayer message.');
+        return;
+      }
+      const hostTime = parseFlightTimeMessage(event.data);
+      if (hostTime) {
+        if (role === 'join' && !receivedHostTelemetry && hostTime.sequence > lastReceivedTimeSequence) {
+          lastReceivedTimeSequence = hostTime.sequence;
+          simulationTimeRef.current = hostTime.minutes;
+          setFlightStartTimeMinutes(hostTime.minutes);
+          setSimulationTimeMinutes(hostTime.minutes);
+          setInitialTimeInput(formatTimeOfDay(hostTime.minutes));
+        }
+        return;
+      }
+
+      const telemetry = parseFlightTelemetryMessage(event.data);
+      if (!telemetry) {
+        setMultiplayerStatus('Received invalid telemetry from a peer.');
+        return;
+      }
+      if (telemetry.sequence <= (lastReceivedSequences.get(telemetry.playerId) ?? -1)) return;
+      lastReceivedSequences.set(telemetry.playerId, telemetry.sequence);
+      peerPlayersRef.current.get(sessionId)?.add(telemetry.playerId);
+      setRemoteTelemetryByPlayer(current => ({
+        ...current,
+        [telemetry.playerId]: telemetry,
+      }));
+
+      if (role === 'host') {
+        for (const [otherSessionId, otherChannel] of dataChannelsRef.current) {
+          if (otherSessionId !== sessionId && otherChannel.readyState === 'open') {
+            try {
+              otherChannel.send(event.data);
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              setMultiplayerStatus(`Could not relay peer telemetry: ${message}`);
+            }
+          }
+        }
+      } else if (telemetry.isHost) {
+        receivedHostTelemetry = true;
+        simulationTimeRef.current = telemetry.simulationTimeMinutes;
+        setSimulationTimeMinutes(telemetry.simulationTimeMinutes);
+        setInitialTimeInput(formatTimeOfDay(telemetry.simulationTimeMinutes));
+      }
+    };
+  };
+
+  const handleInitialTimeChange = (value: string) => {
+    setInitialTimeInput(value);
+    if (multiplayerRole !== 'host' || !/^\d{2}:\d{2}$/.test(value)) return;
+    const [hours, minutes] = value.split(':').map(Number);
+    const timeOfDayMinutes = hours * 60 + minutes;
+    dataChannelsRef.current.forEach(channel => sendHostTime(channel, timeOfDayMinutes));
+  };
+
+  const handleMultiplayerRoleChange = (role: 'solo' | 'host' | 'join') => {
+    closePeerConnections();
+    setMultiplayerRole(role);
+    setLocalDescription('');
+    setRemoteDescription('');
+    setMultiplayerStatus(role === 'solo' ? 'Solo flight' : `Ready to ${role === 'host' ? 'host' : 'join'} a flight.`);
+  };
+
+  const handleCreateOffer = async () => {
+    if (multiplayerOperationRef.current) return;
+    multiplayerOperationRef.current = true;
+    setMultiplayerBusy(true);
+    const sessionId = crypto.randomUUID();
+    setHostPeerSessions(sessions => [...sessions, {
+      id: sessionId,
+      offer: '',
+      answer: '',
+      status: 'creating offer',
+    }]);
+
+    try {
+      const connection = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      });
+      peerConnectionsRef.current.set(sessionId, connection);
+      configurePeerConnection(connection, sessionId, 'host');
+      configureDataChannel(connection.createDataChannel('flight-telemetry', { ordered: false }), sessionId, 'host');
+      await connection.setLocalDescription(await connection.createOffer());
+      await waitForIceGatheringComplete(connection);
+      if (!connection.localDescription) throw new Error('The peer connection did not produce a local offer.');
+      const offer = encodeSessionDescription(connection.localDescription);
+      setHostPeerSessions(sessions => sessions.map(session =>
+        session.id === sessionId ? { ...session, offer, status: 'offer ready' } : session,
+      ));
+      setMultiplayerStatus('Offer ready. Share it with one joiner and apply their answer here.');
+    } catch (error) {
+      dataChannelsRef.current.get(sessionId)?.close();
+      peerConnectionsRef.current.get(sessionId)?.close();
+      dataChannelsRef.current.delete(sessionId);
+      peerConnectionsRef.current.delete(sessionId);
+      setHostPeerSessions(sessions => sessions.map(session =>
+        session.id === sessionId ? { ...session, status: 'offer failed' } : session,
+      ));
+      const message = error instanceof Error ? error.message : String(error);
+      setMultiplayerStatus(`Could not create offer: ${message}`);
+    } finally {
+      multiplayerOperationRef.current = false;
+      setMultiplayerBusy(false);
+    }
+  };
+
+  const handleCreateAnswer = async () => {
+    if (multiplayerOperationRef.current) return;
+    multiplayerOperationRef.current = true;
+    setMultiplayerBusy(true);
+    closePeerConnections();
+    setLocalDescription('');
+    setMultiplayerStatus('Reading offer and gathering ICE candidates...');
+
+    try {
+      const connection = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      });
+      peerConnectionsRef.current.set('host', connection);
+      configurePeerConnection(connection, 'host', 'join');
+      connection.ondatachannel = event => configureDataChannel(event.channel, 'host', 'join');
+      await connection.setRemoteDescription(decodeSessionDescription(remoteDescription, 'offer'));
+      await connection.setLocalDescription(await connection.createAnswer());
+      await waitForIceGatheringComplete(connection);
+      if (!connection.localDescription) throw new Error('The peer connection did not produce a local answer.');
+      setLocalDescription(encodeSessionDescription(connection.localDescription));
+      setMultiplayerStatus('Answer ready. Share it with the host to complete the connection.');
+    } catch (error) {
+      closePeerConnections();
+      const message = error instanceof Error ? error.message : String(error);
+      setMultiplayerStatus(`Could not create answer: ${message}`);
+    } finally {
+      multiplayerOperationRef.current = false;
+      setMultiplayerBusy(false);
+    }
+  };
+
+  const handleApplyAnswer = async (sessionId: string) => {
+    if (multiplayerOperationRef.current) return;
+    const session = hostPeerSessions.find(candidate => candidate.id === sessionId);
+    const connection = peerConnectionsRef.current.get(sessionId);
+    if (!session || !connection) {
+      setMultiplayerStatus('Create a fresh offer before applying this answer.');
+      return;
+    }
+
+    multiplayerOperationRef.current = true;
+    setMultiplayerBusy(true);
+    setHostPeerSessions(sessions => sessions.map(candidate =>
+      candidate.id === sessionId ? { ...candidate, status: 'connecting' } : candidate,
+    ));
+    try {
+      await connection.setRemoteDescription(decodeSessionDescription(session.answer, 'answer'));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setHostPeerSessions(sessions => sessions.map(candidate =>
+        candidate.id === sessionId ? { ...candidate, status: 'answer rejected' } : candidate,
+      ));
+      setMultiplayerStatus(`Could not apply answer: ${message}`);
+    } finally {
+      multiplayerOperationRef.current = false;
+      setMultiplayerBusy(false);
+    }
+  };
+
+  const handleHostAnswerChange = (sessionId: string, answer: string) => {
+    setHostPeerSessions(sessions => sessions.map(session =>
+      session.id === sessionId ? { ...session, answer } : session,
+    ));
+  };
 
   const handleStartFlight = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (multiplayerRole !== 'solo' && !multiplayerConnected) {
+      setSetupError('Complete the peer connection before starting a multiplayer flight.');
+      return;
+    }
+
     const latitude = Number(latitudeInput);
     const longitude = Number(longitudeInput);
     const timeParts = initialTimeInput.split(':').map(Number);
@@ -116,18 +433,26 @@ export default function Home() {
       return;
     }
 
-    const startTimeMinutes = timeParts[0] * 60 + timeParts[1];
+    const startTimeMinutes = multiplayerRole === 'join' && multiplayerConnected
+      ? simulationTimeRef.current
+      : timeParts[0] * 60 + timeParts[1];
     setSetupError('');
     setTerrainGrid(null);
     setTerrainOrigin({ latitude, longitude });
     setFlightStartTimeMinutes(startTimeMinutes);
     setSimulationTimeMinutes(startTimeMinutes);
+    simulationTimeRef.current = startTimeMinutes;
     setTerrainStatus('waiting for flight dynamics');
     setStatus('Loading flight dynamics...');
     setSimulationStarted(true);
   };
 
   const handleEndFlight = () => {
+    closePeerConnections();
+    setMultiplayerRole('solo');
+    setMultiplayerStatus('Solo flight');
+    setLocalDescription('');
+    setRemoteDescription('');
     setSimulationStarted(false);
     setFlightReady(false);
     setTerrainGrid(null);
@@ -151,6 +476,11 @@ export default function Home() {
     setAutoLevel(nextVal);
     autoLevelRef.current = nextVal;
   };
+
+  useEffect(() => () => {
+    dataChannelsRef.current.forEach(channel => channel.close());
+    peerConnectionsRef.current.forEach(connection => connection.close());
+  }, []);
 
   useEffect(() => {
     if (!simulationStarted) return;
@@ -203,6 +533,7 @@ export default function Home() {
         setFlightReady(true);
 
         let lastTime = performance.now();
+        let telemetrySendElapsed = 0;
 
         const loop = (currentTime: number) => {
           if (disposed) return;
@@ -266,7 +597,48 @@ export default function Home() {
             setRoll(nextRoll);
             setHeading(nextHeading);
             setVSpeed(nextVSpeed);
-            setStalled(engineInstance.getStalled());
+            const nextStalled = engineInstance.getStalled();
+            setStalled(nextStalled);
+
+            telemetrySendElapsed += clampedDt;
+            const openChannels = Array.from(dataChannelsRef.current.values())
+              .filter(channel => channel.readyState === 'open');
+            if (telemetrySendElapsed >= 0.1 && openChannels.length > 0) {
+              telemetrySendElapsed %= 0.1;
+              const aircraftCoordinates = getAircraftCoordinates(
+                terrainOrigin,
+                nextPosX,
+                nextPosZ,
+              );
+              if (!playerIdRef.current) playerIdRef.current = crypto.randomUUID();
+              const telemetry: FlightTelemetry = {
+                playerId: playerIdRef.current,
+                isHost: multiplayerRole === 'host',
+                posX: nextPosX,
+                posZ: nextPosZ,
+                altitude: nextAltitude,
+                pitch: nextPitch,
+                roll: nextRoll,
+                heading: nextHeading,
+                airspeed: nextAirspeed,
+                throttle: nextThrottle,
+                verticalSpeed: nextVSpeed,
+                stalled: nextStalled,
+                ...aircraftCoordinates,
+                sequence: telemetrySequenceRef.current,
+                simulationTimeMinutes: simulationTimeRef.current,
+              };
+              telemetrySequenceRef.current += 1;
+              const message = JSON.stringify({ type: 'telemetry', telemetry });
+              for (const channel of openChannels) {
+                try {
+                  channel.send(message);
+                } catch (error) {
+                  const errorMessage = error instanceof Error ? error.message : String(error);
+                  setMultiplayerStatus(`Could not send flight telemetry: ${errorMessage}`);
+                }
+              }
+            }
           }
 
           animationFrameId = requestAnimationFrame(loop);
@@ -291,10 +663,11 @@ export default function Home() {
       engineRef.current = null;
       wasmModuleRef.current = null;
     };
-  }, [simulationStarted]);
+  }, [multiplayerRole, simulationStarted, terrainOrigin]);
 
   useEffect(() => {
     if (!simulationStarted) return;
+    if (multiplayerRole === 'join' && multiplayerConnected) return;
 
     const startedAt = Date.now();
     const updateSimulationTime = () => {
@@ -305,7 +678,11 @@ export default function Home() {
     updateSimulationTime();
     const intervalId = window.setInterval(updateSimulationTime, 1000);
     return () => window.clearInterval(intervalId);
-  }, [flightStartTimeMinutes, simulationStarted]);
+  }, [flightStartTimeMinutes, multiplayerConnected, multiplayerRole, simulationStarted]);
+
+  useEffect(() => {
+    simulationTimeRef.current = simulationTimeMinutes;
+  }, [simulationTimeMinutes]);
 
   useEffect(() => {
     latestPositionRef.current = { posX, posZ };
@@ -360,13 +737,27 @@ export default function Home() {
   if (!simulationStarted) {
     return (
       <PreflightScreen
+        multiplayerRole={multiplayerRole}
+        multiplayerStatus={multiplayerStatus}
+        multiplayerBusy={multiplayerBusy}
+        canStartFlight={multiplayerRole === 'solo' || multiplayerConnected}
+        hostPeerSessions={hostPeerSessions}
+        localDescription={localDescription}
+        remoteDescription={remoteDescription}
         latitude={latitudeInput}
         longitude={longitudeInput}
         initialTime={initialTimeInput}
+        timeControlledByHost={multiplayerRole === 'join'}
         error={setupError}
+        onMultiplayerRoleChange={handleMultiplayerRoleChange}
+        onCreateOffer={handleCreateOffer}
+        onCreateAnswer={handleCreateAnswer}
+        onApplyAnswer={handleApplyAnswer}
+        onHostAnswerChange={handleHostAnswerChange}
+        onRemoteDescriptionChange={setRemoteDescription}
         onLatitudeChange={setLatitudeInput}
         onLongitudeChange={setLongitudeInput}
-        onInitialTimeChange={setInitialTimeInput}
+        onInitialTimeChange={handleInitialTimeChange}
         onSubmit={handleStartFlight}
       />
     );
@@ -383,6 +774,9 @@ export default function Home() {
               MACHWEB
             </h1>
             <p className="text-xs text-zinc-400 mt-1">{status}</p>
+            {multiplayerRole !== 'solo' && (
+              <p className="mt-1 text-xs text-emerald-300">{multiplayerStatus}</p>
+            )}
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-4">
             <button
@@ -415,6 +809,8 @@ export default function Home() {
             heading={heading}
             airspeed={airspeed}
             stalled={stalled}
+            remoteTelemetries={Object.values(remoteTelemetryByPlayer)}
+            terrainOrigin={terrainOrigin}
             terrainGrid={terrainGrid}
             terrainStatus={terrainStatus}
             simulationTimeMinutes={simulationTimeMinutes}

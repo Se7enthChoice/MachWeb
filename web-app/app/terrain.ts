@@ -62,7 +62,7 @@ function getTileAddress(latitude: number, longitude: number): TileAddress {
   };
 }
 
-function getAircraftCoordinates(
+export function getAircraftCoordinates(
   origin: TerrainOrigin,
   posXFeet: number,
   posZFeet: number,
@@ -184,6 +184,16 @@ function localZFeet(latitude: number, origin: TerrainOrigin): number {
     EARTH_RADIUS_METERS *
     FEET_PER_METER
   );
+}
+
+export function getLocalPosition(
+  origin: TerrainOrigin,
+  coordinates: TerrainOrigin,
+): { posXFeet: number; posZFeet: number } {
+  return {
+    posXFeet: localXFeet(coordinates.longitude, origin),
+    posZFeet: localZFeet(coordinates.latitude, origin),
+  };
 }
 
 export async function loadTerrainGrid(

@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { getSatelliteTileUrl } from '../terrain';
-import type { TerrainGrid } from '../terrain';
+import { getLocalPosition, getSatelliteTileUrl } from '../terrain';
+import type { TerrainGrid, TerrainOrigin } from '../terrain';
+import type { FlightTelemetry } from '../webrtc';
 
 interface FlightViewportProps {
   posX: number;
@@ -14,13 +15,32 @@ interface FlightViewportProps {
   heading: number;
   airspeed: number;
   stalled: boolean;
+  remoteTelemetries: FlightTelemetry[];
+  terrainOrigin: TerrainOrigin;
   terrainGrid: TerrainGrid | null;
   terrainStatus: string;
   simulationTimeMinutes: number;
 }
 
+interface RemoteAircraftSample {
+  receivedAt: number;
+  telemetry: FlightTelemetry;
+  posXFeet: number;
+  posZFeet: number;
+}
+
+interface RemoteAircraftInstance {
+  aircraft: THREE.Group;
+  lights: THREE.Group;
+  samples: RemoteAircraftSample[];
+  lastSequence: number;
+}
+
 const visualScale = 0.01;
 const feetPerMeter = 3.28084;
+const REMOTE_INTERPOLATION_DELAY_MS = 150;
+const MAX_REMOTE_SAMPLES = 20;
+const REMOTE_AIRCRAFT_COLORS = [0x38bdf8, 0xfbbf24, 0xf472b6, 0xa3e635, 0xc084fc];
 const TERRAIN_MESH_SEGMENTS = 64;
 const MAX_CONCURRENT_IMAGERY_REQUESTS = 8;
 const CELESTIAL_DISTANCE = 1800;
@@ -50,6 +70,93 @@ function terrainColor(elevationMeters: number): THREE.Color {
   return terrainColors[5];
 }
 
+function interpolateAngle(start: number, end: number, amount: number): number {
+  const delta = THREE.MathUtils.euclideanModulo(end - start + 180, 360) - 180;
+  return start + delta * amount;
+}
+
+function createRemoteAircraft(color: number): { aircraft: THREE.Group; lights: THREE.Group } {
+  const aircraft = new THREE.Group();
+  const lights = new THREE.Group();
+  const aircraftMaterial = new THREE.MeshLambertMaterial({ color });
+  const cockpitMaterial = new THREE.MeshLambertMaterial({ color: 0xe0f2fe });
+  const fuselage = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.018, 0.032, 0.82, 10),
+    aircraftMaterial,
+  );
+  fuselage.rotation.x = Math.PI / 2;
+  fuselage.castShadow = true;
+  aircraft.add(fuselage);
+
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.022, 0.16, 10), aircraftMaterial);
+  nose.rotation.x = -Math.PI / 2;
+  nose.position.z = -0.48;
+  nose.castShadow = true;
+  aircraft.add(nose);
+
+  const wings = new THREE.Mesh(new THREE.BoxGeometry(0.88, 0.018, 0.14), aircraftMaterial);
+  wings.position.z = -0.04;
+  wings.castShadow = true;
+  aircraft.add(wings);
+
+  const tailplane = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.014, 0.08), aircraftMaterial);
+  tailplane.position.z = 0.34;
+  tailplane.castShadow = true;
+  aircraft.add(tailplane);
+
+  const fin = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.1, 0.12), aircraftMaterial);
+  fin.position.set(0, 0.055, 0.32);
+  fin.castShadow = true;
+  aircraft.add(fin);
+
+  const cockpit = new THREE.Mesh(
+    new THREE.SphereGeometry(0.035, 10, 8),
+    cockpitMaterial,
+  );
+  cockpit.scale.set(0.85, 0.65, 1.7);
+  cockpit.position.set(0, 0.028, -0.13);
+  aircraft.add(cockpit);
+
+  const addAircraftLight = (x: number, y: number, z: number, color: number) => {
+    const lightGroup = new THREE.Group();
+    lightGroup.position.set(x, y, z);
+    lightGroup.add(new THREE.PointLight(color, 3, 45, 2));
+    lightGroup.add(new THREE.Mesh(
+      new THREE.SphereGeometry(0.025, 8, 6),
+      new THREE.MeshBasicMaterial({ color, toneMapped: false }),
+    ));
+    lights.add(lightGroup);
+  };
+
+  addAircraftLight(-0.44, 0, -0.04, 0xff3030);
+  addAircraftLight(0.44, 0, -0.04, 0x22ff77);
+  addAircraftLight(0, 0.02, 0.4, 0xffffff);
+  lights.visible = false;
+  aircraft.add(lights);
+  aircraft.visible = false;
+
+  return { aircraft, lights };
+}
+
+function disposeRemoteAircraft(aircraft: THREE.Group): void {
+  aircraft.traverse(object => {
+    if (!(object instanceof THREE.Mesh)) return;
+    object.geometry.dispose();
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    materials.forEach(material => material.dispose());
+  });
+}
+
+function getPlayerAircraftColor(playerId: string): number {
+  let hash = 0;
+  for (let index = 0; index < playerId.length; index += 1) {
+    hash = (hash * 31 + playerId.charCodeAt(index)) | 0;
+  }
+  const colorIndex = ((hash % REMOTE_AIRCRAFT_COLORS.length) + REMOTE_AIRCRAFT_COLORS.length) %
+    REMOTE_AIRCRAFT_COLORS.length;
+  return REMOTE_AIRCRAFT_COLORS[colorIndex];
+}
+
 export default function FlightViewport({
   posX,
   posZ,
@@ -59,6 +166,8 @@ export default function FlightViewport({
   heading,
   airspeed,
   stalled,
+  remoteTelemetries,
+  terrainOrigin,
   terrainGrid,
   terrainStatus,
   simulationTimeMinutes,
@@ -68,6 +177,7 @@ export default function FlightViewport({
   const sceneRef = useRef<THREE.Scene | null>(null);
   const simulationTimeRef = useRef(simulationTimeMinutes);
   const fallbackGroundRef = useRef<THREE.Group | null>(null);
+  const remoteAircraftRef = useRef(new Map<string, RemoteAircraftInstance>());
   const terrainMeshesRef = useRef<
     Array<THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial>>
   >([]);
@@ -79,6 +189,7 @@ export default function FlightViewport({
   useEffect(() => {
     const currentMount = mountRef.current;
     if (!currentMount) return;
+    const remoteAircrafts = remoteAircraftRef.current;
 
     // 1. Scene
     const scene = new THREE.Scene();
@@ -182,6 +293,46 @@ export default function FlightViewport({
     const animate = () => {
       animId = requestAnimationFrame(animate);
       const timeMinutes = simulationTimeRef.current;
+      const renderTime = performance.now() - REMOTE_INTERPOLATION_DELAY_MS;
+      for (const instance of remoteAircrafts.values()) {
+        const { aircraft, lights, samples } = instance;
+        lights.visible = timeMinutes >= 18 * 60 || timeMinutes < 6 * 60;
+        while (samples.length > 2 && samples[1].receivedAt <= renderTime) samples.shift();
+
+        if (samples.length === 0 || performance.now() - samples[samples.length - 1].receivedAt > 2_000) {
+          aircraft.visible = false;
+          continue;
+        }
+
+        const first = samples[0];
+        const second = samples[1];
+        const amount = second
+          ? THREE.MathUtils.clamp(
+              (renderTime - first.receivedAt) / (second.receivedAt - first.receivedAt),
+              0,
+              1,
+            )
+          : 0;
+        const start = first.telemetry;
+        const end = second?.telemetry ?? start;
+        aircraft.visible = true;
+        aircraft.position.set(
+          THREE.MathUtils.lerp(first.posXFeet, second?.posXFeet ?? first.posXFeet, amount) * visualScale,
+          THREE.MathUtils.lerp(start.altitude, end.altitude, amount) * visualScale,
+          THREE.MathUtils.lerp(first.posZFeet, second?.posZFeet ?? first.posZFeet, amount) * visualScale,
+        );
+        aircraft.rotation.order = 'YXZ';
+        aircraft.rotation.y = -THREE.MathUtils.degToRad(
+          interpolateAngle(start.heading, end.heading, amount),
+        );
+        aircraft.rotation.x = THREE.MathUtils.degToRad(
+          THREE.MathUtils.lerp(start.pitch, end.pitch, amount),
+        );
+        aircraft.rotation.z = -THREE.MathUtils.degToRad(
+          interpolateAngle(start.roll, end.roll, amount),
+        );
+      }
+
       const solarAngle = (timeMinutes / (24 * 60)) * Math.PI * 2 - Math.PI / 2;
       const solarHeight = Math.sin(solarAngle);
       const daylight = THREE.MathUtils.clamp((solarHeight + 0.12) / 0.32, 0, 1);
@@ -253,6 +404,7 @@ export default function FlightViewport({
       renderer.dispose();
       sceneRef.current = null;
       fallbackGroundRef.current = null;
+      remoteAircrafts.clear();
       terrainMeshesRef.current = [];
     };
   }, []);
@@ -430,6 +582,46 @@ export default function FlightViewport({
     cameraRef.current.rotation.x = THREE.MathUtils.degToRad(pitch);
     cameraRef.current.rotation.z = -THREE.MathUtils.degToRad(roll);
   }, [posX, posZ, altitude, pitch, roll, heading]);
+
+  useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    const currentPlayerIds = new Set(remoteTelemetries.map(telemetry => telemetry.playerId));
+
+    for (const [playerId, instance] of remoteAircraftRef.current) {
+      if (currentPlayerIds.has(playerId)) continue;
+      scene.remove(instance.aircraft);
+      disposeRemoteAircraft(instance.aircraft);
+      remoteAircraftRef.current.delete(playerId);
+    }
+
+    for (const telemetry of remoteTelemetries) {
+      let instance = remoteAircraftRef.current.get(telemetry.playerId);
+      if (!instance) {
+        const model = createRemoteAircraft(getPlayerAircraftColor(telemetry.playerId));
+        scene.add(model.aircraft);
+        instance = {
+          ...model,
+          samples: [],
+          lastSequence: -1,
+        };
+        remoteAircraftRef.current.set(telemetry.playerId, instance);
+      }
+      if (telemetry.sequence <= instance.lastSequence) continue;
+
+      const localPosition = getLocalPosition(terrainOrigin, telemetry);
+      instance.samples.push({
+        receivedAt: performance.now(),
+        telemetry,
+        posXFeet: localPosition.posXFeet,
+        posZFeet: localPosition.posZFeet,
+      });
+      instance.lastSequence = telemetry.sequence;
+      if (instance.samples.length > MAX_REMOTE_SAMPLES) {
+        instance.samples.splice(0, instance.samples.length - MAX_REMOTE_SAMPLES);
+      }
+    }
+  }, [remoteTelemetries, terrainOrigin]);
 
   const imageryStatus =
     terrainGrid && imageryProgress?.grid === terrainGrid

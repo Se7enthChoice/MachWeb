@@ -14,7 +14,7 @@ private:
     };
 
     static constexpr float ktsToFeetPerSecond = 1.68781f;
-    static constexpr float gravity = 32.174f;
+    static constexpr float gravity = 32.174f; // ft/s²
     static constexpr float degreesToRadians = 3.14159265f / 180.0f;
     static constexpr float radiansToDegrees = 180.0f / 3.14159265f;
     static constexpr float metersToFeet = 3.28084f;

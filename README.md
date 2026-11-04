@@ -124,7 +124,14 @@ The viewport loads public AWS Open Data Terrain Tiles in Mapzen Terrarium format
 
 The same height grid is copied into WebAssembly once per neighborhood update. Native physics keeps that grid and bilinearly samples it in the flight loop, converting meters to feet for ground contact. Local flight coordinates are treated as a tangent-plane approximation around the chosen origin; this is suitable for the current local flight sector, not long-distance navigation. Terrain data requires network access to the public tile service.
 
+## Peer-to-peer multiplayer
+
+On the preflight screen, choose **Host** and create a separate offer for each joiner. Send each offer using a private out-of-band channel. Each joiner chooses **Join**, pastes their offer, creates an answer, and returns it to the host. Paste each answer into its matching host card and connect the joiners. The host relays each participant's telemetry to all other connected players, so every client sees the other aircraft while maintaining only one P2P connection per joiner. Both players can then start a flight; while connected, each browser sends its flight telemetry over unordered WebRTC data channels. The host controls the shared time of day; connected joiners' time setting is read-only and follows the host during the flight. The host's relay traffic and processing load grow roughly with the square of the number of participants, so practical capacity depends on the host's network and device.
+
+The connection uses Google's public STUN service to discover network addresses. There is no signaling service or TURN relay, so some restrictive NATs or firewalls may prevent a direct connection. Offer and answer strings contain connection metadata; share them only with the intended peer. A working browser WebRTC implementation and a secure context (HTTPS, or localhost) are required.
+
 ## Development Workflow
+
 Modifying Physics (`sim-core/main.cpp`): Edit your C++ simulation logic, then run `./build.ps1` from the root folder to recompile. Refresh your browser to see the updates instantly.
 
 Modifying UI/Dashboard (`web-app/app/page.tsx`): Next.js handles hot-reloading for all TypeScript/React frontend code automatically.
