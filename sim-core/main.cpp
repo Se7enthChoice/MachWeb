@@ -299,25 +299,28 @@ public:
         forward = normalized(forward);
         right = normalized(cross(forward, up));
         up = normalized(cross(right, forward));
-        pitchAngle = std::asin(std::clamp(forward.y, -1.0f, 1.0f)) * radiansToDegrees;
-        heading = wrapHeading(std::atan2(forward.x, -forward.z) * radiansToDegrees);
-        rollAngle = wrapSignedAngle(std::atan2(-right.y, up.y) * radiansToDegrees);
-        if (pitchAngle > 85.0f) {
-            pitchAngle = 85.0f;
-            pitchRate = std::min(pitchRate, 0.0f);
-            getOrientationBasis(heading, pitchAngle, rollAngle, forward, up, right);
-        } else if (pitchAngle < -85.0f) {
-            pitchAngle = -85.0f;
-            pitchRate = std::max(pitchRate, 0.0f);
-            getOrientationBasis(heading, pitchAngle, rollAngle, forward, up, right);
-        }
+        const float principalPitch = std::asin(std::clamp(forward.y, -1.0f, 1.0f)) *
+            radiansToDegrees;
+        const float invertedPitch = principalPitch >= 0.0f
+            ? 180.0f - principalPitch
+            : -180.0f - principalPitch;
+        const bool useInvertedPitch =
+            std::abs(wrapSignedAngle(invertedPitch - pitchAngle)) <
+            std::abs(wrapSignedAngle(principalPitch - pitchAngle));
+
+        pitchAngle = wrapSignedAngle(useInvertedPitch ? invertedPitch : principalPitch);
+        heading = wrapHeading(
+            std::atan2(forward.x, -forward.z) * radiansToDegrees +
+            (useInvertedPitch ? 180.0f : 0.0f));
+        rollAngle = wrapSignedAngle(
+            std::atan2(-right.y, up.y) * radiansToDegrees +
+            (useInvertedPitch ? 180.0f : 0.0f));
 
         const float groundElevation = getGroundElevation();
         if (altitude <= groundElevation && velocityY < 0.0f) {
             altitude = groundElevation;
             velocityY = 0.0f;
             verticalSpeed = 0.0f;
-            pitchAngle = std::max(pitchAngle, 0.0f);
         }
     }
 
