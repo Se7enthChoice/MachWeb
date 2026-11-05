@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { getLocalPosition, getSatelliteTileUrl } from '../terrain';
+import { getAircraftCoordinates, getLocalPosition, getSatelliteTileUrl } from '../terrain';
 import type { TerrainGrid, TerrainOrigin } from '../terrain';
 import type { FlightTelemetry } from '../webrtc';
 
@@ -74,6 +74,81 @@ function terrainColor(elevationMeters: number): THREE.Color {
 function interpolateAngle(start: number, end: number, amount: number): number {
   const delta = THREE.MathUtils.euclideanModulo(end - start + 180, 360) - 180;
   return start + delta * amount;
+}
+
+function getSolarPosition(
+  date: Date,
+  latitude: number,
+  longitude: number,
+): { elevation: number; azimuth: number } {
+  const julianDay = date.getTime() / 86_400_000 + 2_440_587.5;
+  const century = (julianDay - 2_451_545) / 36_525;
+  const meanLongitude = THREE.MathUtils.euclideanModulo(
+    280.46646 + century * (36_000.76983 + century * 0.0003032),
+    360,
+  );
+  const meanAnomaly = 357.52911 + century * (35_999.05029 - 0.0001537 * century);
+  const anomalyRadians = THREE.MathUtils.degToRad(meanAnomaly);
+  const orbitEccentricity = 0.016708634 - century * (0.000042037 + 0.0000001267 * century);
+  const equationOfCenter =
+    Math.sin(anomalyRadians) * (1.914602 - century * (0.004817 + 0.000014 * century)) +
+    Math.sin(2 * anomalyRadians) * (0.019993 - 0.000101 * century) +
+    Math.sin(3 * anomalyRadians) * 0.000289;
+  const trueLongitude = meanLongitude + equationOfCenter;
+  const omega = 125.04 - 1934.136 * century;
+  const apparentLongitude =
+    trueLongitude - 0.00569 - 0.00478 * Math.sin(THREE.MathUtils.degToRad(omega));
+  const meanObliquity =
+    23 +
+    (26 +
+      (21.448 -
+        century * (46.815 + century * (0.00059 - century * 0.001813))) /
+        60) /
+      60;
+  const correctedObliquity =
+    meanObliquity + 0.00256 * Math.cos(THREE.MathUtils.degToRad(omega));
+  const obliquityRadians = THREE.MathUtils.degToRad(correctedObliquity);
+  const apparentLongitudeRadians = THREE.MathUtils.degToRad(apparentLongitude);
+  const declination = Math.asin(Math.sin(obliquityRadians) * Math.sin(apparentLongitudeRadians));
+  const y = Math.tan(obliquityRadians / 2) ** 2;
+  const longitudeRadians = THREE.MathUtils.degToRad(meanLongitude);
+  const equationOfTime =
+    4 *
+    THREE.MathUtils.radToDeg(
+      y * Math.sin(2 * longitudeRadians) -
+        2 * orbitEccentricity * Math.sin(anomalyRadians) +
+        4 * orbitEccentricity * y * Math.sin(anomalyRadians) * Math.cos(2 * longitudeRadians) -
+        0.5 * y * y * Math.sin(4 * longitudeRadians) -
+        1.25 * orbitEccentricity ** 2 * Math.sin(2 * anomalyRadians),
+    );
+  const utcMinutes =
+    date.getUTCHours() * 60 +
+    date.getUTCMinutes() +
+    date.getUTCSeconds() / 60 +
+    date.getUTCMilliseconds() / 60_000;
+  const solarMinutes = THREE.MathUtils.euclideanModulo(
+    utcMinutes + equationOfTime + 4 * longitude,
+    1440,
+  );
+  const hourAngle = THREE.MathUtils.degToRad(solarMinutes / 4 - 180);
+  const latitudeRadians = THREE.MathUtils.degToRad(latitude);
+  const cosineZenith = THREE.MathUtils.clamp(
+    Math.sin(latitudeRadians) * Math.sin(declination) +
+      Math.cos(latitudeRadians) * Math.cos(declination) * Math.cos(hourAngle),
+    -1,
+    1,
+  );
+  const elevation = 90 - THREE.MathUtils.radToDeg(Math.acos(cosineZenith));
+  const azimuth =
+    THREE.MathUtils.radToDeg(
+      Math.atan2(
+        Math.sin(hourAngle),
+        Math.cos(hourAngle) * Math.sin(latitudeRadians) -
+          Math.tan(declination) * Math.cos(latitudeRadians),
+      ),
+    ) + 180;
+
+  return { elevation, azimuth };
 }
 
 function createRemoteAircraft(color: number): { aircraft: THREE.Group; lights: THREE.Group } {
@@ -177,6 +252,7 @@ export default function FlightViewport({
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const simulationTimeRef = useRef(simulationTimeMinutes);
+  const terrainOriginRef = useRef(terrainOrigin);
   const fallbackGroundRef = useRef<THREE.Group | null>(null);
   const remoteAircraftRef = useRef(new Map<string, RemoteAircraftInstance>());
   const terrainMeshesRef = useRef<
@@ -334,8 +410,26 @@ export default function FlightViewport({
         );
       }
 
-      const solarAngle = (timeMinutes / (24 * 60)) * Math.PI * 2 - Math.PI / 2;
-      const solarHeight = Math.sin(solarAngle);
+      const currentDate = new Date();
+      const solarDate = new Date(
+        currentDate.getFullYear(),
+        currentDate.getMonth(),
+        currentDate.getDate(),
+        0,
+        timeMinutes,
+      );
+      const aircraftCoordinates = getAircraftCoordinates(
+        terrainOriginRef.current,
+        camera.position.x / visualScale,
+        camera.position.z / visualScale,
+      );
+      const solarPosition = getSolarPosition(
+        solarDate,
+        aircraftCoordinates.latitude,
+        aircraftCoordinates.longitude,
+      );
+      const solarElevation = THREE.MathUtils.degToRad(solarPosition.elevation);
+      const solarHeight = Math.sin(solarElevation);
       const daylight = THREE.MathUtils.clamp((solarHeight + 0.12) / 0.32, 0, 1);
       const twilight = 1 - THREE.MathUtils.clamp(Math.abs(solarHeight) * 3, 0, 1);
       const sky = skyColor
@@ -355,7 +449,12 @@ export default function FlightViewport({
 
       // The visible bodies follow the aircraft; the lights target the terrain below it.
       lightTarget.set(camera.position.x, 0, camera.position.z);
-      sunDirection.set(Math.cos(solarAngle), solarHeight, 0).normalize();
+      const solarAzimuth = THREE.MathUtils.degToRad(solarPosition.azimuth);
+      sunDirection.set(
+        Math.sin(solarAzimuth) * Math.cos(solarElevation),
+        solarHeight,
+        -Math.cos(solarAzimuth) * Math.cos(solarElevation),
+      ).normalize();
       moonDirection.copy(sunDirection).negate();
       dirLight.target.position.copy(lightTarget);
       dirLight.position.copy(lightTarget).addScaledVector(sunDirection, LIGHT_DISTANCE);
@@ -413,6 +512,10 @@ export default function FlightViewport({
   useEffect(() => {
     simulationTimeRef.current = simulationTimeMinutes;
   }, [simulationTimeMinutes]);
+
+  useEffect(() => {
+    terrainOriginRef.current = terrainOrigin;
+  }, [terrainOrigin]);
 
   useEffect(() => {
     const scene = sceneRef.current;

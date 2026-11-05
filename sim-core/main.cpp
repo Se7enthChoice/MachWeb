@@ -5,30 +5,16 @@
 #include <cstdint>
 #include <vector>
 
+#include "utils.h"
+
 class SimEngine {
 private:
-    struct Vector3 {
-        float x;
-        float y;
-        float z;
-    };
-
-    static constexpr float ktsToFeetPerSecond = 1.68781f;
-    static constexpr float gravity = 32.174f; // ft/s²
-    static constexpr float degreesToRadians = 3.14159265f / 180.0f;
-    static constexpr float radiansToDegrees = 180.0f / 3.14159265f;
-    static constexpr float metersToFeet = 3.28084f;
-    static constexpr float maxAirspeed = 850.0f;
-    static constexpr float maxVerticalSpeed = 19600.0f;
-    static constexpr float cruiseAirspeed = 300.0f;
-    static constexpr float crashDuration = 3.0f;
-
     float posX = 0.0f;
-    float altitude = 5000.0f;
+    float altitude = 5000.0f; // Feet
     float posZ = 0.0f;
     float velocityX = 0.0f;
     float velocityY = 0.0f;
-    float velocityZ = -300.0f * ktsToFeetPerSecond;
+    float velocityZ = -300.0f * KTs_to_FPS;
     float airspeed = 300.0f;
     float throttle = 0.43f;
     float crashTimeRemaining = 0.0f;
@@ -53,65 +39,18 @@ private:
     float rollInput = 0.0f;
     float yawInput = 0.0f;
 
-    static float clampInput(float value) {
-        return std::isfinite(value) ? std::clamp(value, -1.0f, 1.0f) : 0.0f;
-    }
-
-    static float wrapHeading(float angle) {
-        angle = std::fmod(angle, 360.0f);
-        return angle < 0.0f ? angle + 360.0f : angle;
-    }
-
-    static float wrapSignedAngle(float angle) {
-        angle = std::fmod(angle + 180.0f, 360.0f);
-        if (angle < 0.0f) angle += 360.0f;
-        return angle - 180.0f;
-    }
-
-    static float clampFinite(float value, float minimum, float maximum) {
-        return std::isfinite(value) ? std::clamp(value, minimum, maximum) : minimum;
-    }
-
-    static Vector3 cross(const Vector3& a, const Vector3& b) {
-        return {
-            a.y * b.z - a.z * b.y,
-            a.z * b.x - a.x * b.z,
-            a.x * b.y - a.y * b.x,
-        };
-    }
-
-    static float dot(const Vector3& a, const Vector3& b) {
-        return a.x * b.x + a.y * b.y + a.z * b.z;
-    }
-
-    static Vector3 normalized(const Vector3& value) {
-        const float length = std::sqrt(dot(value, value));
-        if (length < 0.0001f) return {0.0f, 0.0f, 0.0f};
-        return {value.x / length, value.y / length, value.z / length};
-    }
-
-    static Vector3 rotateAroundAxis(const Vector3& value, const Vector3& axis, float angle) {
-        const float cosine = std::cos(angle);
-        const float sine = std::sin(angle);
-        const Vector3 axisCrossValue = cross(axis, value);
-        const float projection = dot(axis, value) * (1.0f - cosine);
-        return {
-            value.x * cosine + axisCrossValue.x * sine + axis.x * projection,
-            value.y * cosine + axisCrossValue.y * sine + axis.y * projection,
-            value.z * cosine + axisCrossValue.z * sine + axis.z * projection,
-        };
-    }
-
+    // Gets the orientation basis vectors (forward, up, right) based on the current heading, pitch, and roll angles.
     static void getOrientationBasis(
         float headingDegrees,
         float pitchDegrees,
         float rollDegrees,
         Vector3& forward,
         Vector3& up,
-        Vector3& right) {
-        const float pitch = pitchDegrees * degreesToRadians;
-        const float roll = rollDegrees * degreesToRadians;
-        const float heading = headingDegrees * degreesToRadians;
+        Vector3& right) 
+        {
+        const float pitch = pitchDegrees * DEG_to_RAD;
+        const float roll = rollDegrees * DEG_to_RAD;
+        const float heading = headingDegrees * DEG_to_RAD;
         const float sinPitch = std::sin(pitch);
         const float cosPitch = std::cos(pitch);
         const float sinRoll = std::sin(roll);
@@ -132,6 +71,7 @@ private:
         };
     }
 
+    // Samples the terrain height in meters at the specified (xFeet, zFeet) position using bilinear interpolation.
     float sampleTerrainMeters(float xFeet, float zFeet) const {
         if (terrainHeightsMeters.empty()) return 0.0f;
 
@@ -160,6 +100,7 @@ private:
     }
 
 public:
+    // The main simulation tick function, which updates the aircraft's state based on the elapsed time (dt).
     void tick(float dt) {
         if (!std::isfinite(dt) || dt <= 0.0f) return;
         dt = std::min(dt, 0.1f);
@@ -170,15 +111,15 @@ public:
         if (!std::isfinite(speedFeetPerSecond)) {
             velocityX = 0.0f;
             velocityY = 0.0f;
-            velocityZ = -300.0f * ktsToFeetPerSecond;
-            speedFeetPerSecond = 300.0f * ktsToFeetPerSecond;
+            velocityZ = -300.0f * KTs_to_FPS;
+            speedFeetPerSecond = 300.0f * KTs_to_FPS;
         }
-        airspeed = clampFinite(speedFeetPerSecond / ktsToFeetPerSecond, 0.0f, maxAirspeed);
+        airspeed = clamp_finite(speedFeetPerSecond / KTs_to_FPS, 0.0f, max_airspeed);
 
-        const float rollRad = rollAngle * degreesToRadians;
+        const float rollRad = rollAngle * DEG_to_RAD;
         const float sinRoll = std::sin(rollRad);
         const float cosRoll = std::cos(rollRad);
-        const float headingRad = heading * degreesToRadians;
+        const float headingRad = heading * DEG_to_RAD;
         const float sinHeading = std::sin(headingRad);
         const float cosHeading = std::cos(headingRad);
 
@@ -188,10 +129,10 @@ public:
         getOrientationBasis(heading, pitchAngle, rollAngle, forward, up, right);
         const Vector3 velocity{velocityX, velocityY, velocityZ};
         const float angleOfAttack = std::atan2(-dot(velocity, up), dot(velocity, forward));
-        const float angleOfAttackDegrees = angleOfAttack * radiansToDegrees;
+        const float angleOfAttackDegrees = angleOfAttack * RAD_to_DEG;
         const float pitchDynamicPressure = std::pow(
-            std::clamp(airspeed / cruiseAirspeed, 0.0f, 1.35f), 2.0f);
-        const float controlAuthority = std::clamp(airspeed / cruiseAirspeed, 0.35f, 1.35f);
+            std::clamp(airspeed / cruise_airspeed, 0.0f, 1.35f), 2.0f);
+        const float controlAuthority = std::clamp(airspeed / cruise_airspeed, 0.35f, 1.35f);
         const float maxRollRate = 100.0f * controlAuthority;
         const float maxYawRate = 10.0f * controlAuthority;
         float targetRollRate = rollInput * maxRollRate;
@@ -230,15 +171,15 @@ public:
         liftY /= liftDirectionLength;
         liftZ /= liftDirectionLength;
 
-        const float liftFactor = airspeed / cruiseAirspeed;
+        const float liftFactor = airspeed / cruise_airspeed;
         const float liftCoefficient = std::clamp(
-            1.0f + angleOfAttack / (12.0f * degreesToRadians), -1.0f, 3.0f);
+            1.0f + angleOfAttack / (12.0f * DEG_to_RAD), -1.0f, 3.0f);
         const float lift = std::clamp(
             gravity * liftFactor * liftFactor * liftCoefficient /
                 std::max(std::abs(cosRoll), 0.2f),
             -gravity * 7.0f,
             gravity * 7.0f);
-        const float bankedTurnRate = radiansToDegrees * lift * sinRoll /
+        const float bankedTurnRate = RAD_to_DEG * lift * sinRoll /
             std::max(speedFeetPerSecond, 50.0f);
 
         const float thrustAcceleration = throttle * 42.0f;
@@ -253,13 +194,13 @@ public:
         velocityZ += (forward.z * thrustAcceleration + liftZ * lift -
             speedZ * dragAcceleration + right.z * lateralAcceleration) * dt;
 
-        velocityY = clampFinite(
+        velocityY = clamp_finite(
             velocityY,
-            -maxVerticalSpeed / 60.0f,
-            maxVerticalSpeed / 60.0f);
+            -max_vertical_speed / 60.0f,
+            max_vertical_speed / 60.0f);
         speedFeetPerSecond = std::sqrt(
             velocityX * velocityX + velocityY * velocityY + velocityZ * velocityZ);
-        const float maxSpeedFeetPerSecond = maxAirspeed * ktsToFeetPerSecond;
+        const float maxSpeedFeetPerSecond = max_airspeed * KTs_to_FPS;
         if (speedFeetPerSecond > maxSpeedFeetPerSecond) {
             const float scale = maxSpeedFeetPerSecond / speedFeetPerSecond;
             velocityX *= scale;
@@ -272,56 +213,56 @@ public:
         posZ += velocityZ * dt;
         verticalSpeed = velocityY * 60.0f;
 
-        posX = clampFinite(posX, -100000000.0f, 100000000.0f);
-        posZ = clampFinite(posZ, -100000000.0f, 100000000.0f);
-        altitude = clampFinite(altitude, -1000000.0f, 1000000.0f);
-        airspeed = clampFinite(
+        posX = clamp_finite(posX, -100000000.0f, 100000000.0f);
+        posZ = clamp_finite(posZ, -100000000.0f, 100000000.0f);
+        altitude = clamp_finite(altitude, -1000000.0f, 1000000.0f);
+        airspeed = clamp_finite(
             std::sqrt(velocityX * velocityX + velocityY * velocityY + velocityZ * velocityZ) /
-                ktsToFeetPerSecond,
+                KTs_to_FPS,
             0.0f,
-            maxAirspeed);
+            max_airspeed);
 
-        const float pitchDelta = pitchRate * dt * degreesToRadians;
-        forward = rotateAroundAxis(forward, right, pitchDelta);
-        up = rotateAroundAxis(up, right, pitchDelta);
+        const float pitchDelta = pitchRate * dt * DEG_to_RAD;
+        forward = rotate_around_axis(forward, right, pitchDelta);
+        up = rotate_around_axis(up, right, pitchDelta);
 
-        const float rollDelta = rollRate * dt * degreesToRadians;
-        up = rotateAroundAxis(up, forward, rollDelta);
-        right = rotateAroundAxis(right, forward, rollDelta);
+        const float rollDelta = rollRate * dt * DEG_to_RAD;
+        up = rotate_around_axis(up, forward, rollDelta);
+        right = rotate_around_axis(right, forward, rollDelta);
 
-        const float yawDelta = -yawRate * dt * degreesToRadians;
-        forward = rotateAroundAxis(forward, up, yawDelta);
-        right = rotateAroundAxis(right, up, yawDelta);
+        const float yawDelta = -yawRate * dt * DEG_to_RAD;
+        forward = rotate_around_axis(forward, up, yawDelta);
+        right = rotate_around_axis(right, up, yawDelta);
 
         const Vector3 worldDown{0.0f, -1.0f, 0.0f};
-        const float bankTurnDelta = bankedTurnRate * dt * degreesToRadians;
-        forward = rotateAroundAxis(forward, worldDown, bankTurnDelta);
-        up = rotateAroundAxis(up, worldDown, bankTurnDelta);
-        right = rotateAroundAxis(right, worldDown, bankTurnDelta);
+        const float bankTurnDelta = bankedTurnRate * dt * DEG_to_RAD;
+        forward = rotate_around_axis(forward, worldDown, bankTurnDelta);
+        up = rotate_around_axis(up, worldDown, bankTurnDelta);
+        right = rotate_around_axis(right, worldDown, bankTurnDelta);
 
         forward = normalized(forward);
         right = normalized(cross(forward, up));
         up = normalized(cross(right, forward));
         const float principalPitch = std::asin(std::clamp(forward.y, -1.0f, 1.0f)) *
-            radiansToDegrees;
+            RAD_to_DEG;
         const float invertedPitch = principalPitch >= 0.0f
             ? 180.0f - principalPitch
             : -180.0f - principalPitch;
         const bool useInvertedPitch =
-            std::abs(wrapSignedAngle(invertedPitch - pitchAngle)) <
-            std::abs(wrapSignedAngle(principalPitch - pitchAngle));
+            std::abs(wrap_signed_angle(invertedPitch - pitchAngle)) <
+            std::abs(wrap_signed_angle(principalPitch - pitchAngle));
 
-        pitchAngle = wrapSignedAngle(useInvertedPitch ? invertedPitch : principalPitch);
-        heading = wrapHeading(
-            std::atan2(forward.x, -forward.z) * radiansToDegrees +
+        pitchAngle = wrap_signed_angle(useInvertedPitch ? invertedPitch : principalPitch);
+        heading = wrap_heading(
+            std::atan2(forward.x, -forward.z) * RAD_to_DEG +
             (useInvertedPitch ? 180.0f : 0.0f));
-        rollAngle = wrapSignedAngle(
-            std::atan2(-right.y, up.y) * radiansToDegrees +
+        rollAngle = wrap_signed_angle(
+            std::atan2(-right.y, up.y) * RAD_to_DEG +
             (useInvertedPitch ? 180.0f : 0.0f));
 
         const float groundElevation = getGroundElevation();
         if (altitude <= groundElevation && velocityY < 0.0f) {
-            if (!onGround) crashTimeRemaining = crashDuration;
+            if (!onGround) crashTimeRemaining = crashed_duration;
             altitude = groundElevation;
             velocityY = 0.0f;
             verticalSpeed = 0.0f;
@@ -331,18 +272,25 @@ public:
         }
     }
 
-    void setPitchInput(float value) { pitchInput = clampInput(value); }
-    void setRollInput(float value) { rollInput = clampInput(value); }
-    void setYawInput(float value) { yawInput = clampInput(value); }
-    void setThrottle(float value) {
+    void setPitchInput(float value) { pitchInput = clamp_finite(value, -1.0f, 1.0f); }
+    void setRollInput(float value) { rollInput = clamp_finite(value, -1.0f, 1.0f); }
+    void setYawInput(float value) { yawInput = clamp_finite(value, -1.0f, 1.0f); }
+
+    void setThrottle(float value) 
+    {
         if (std::isfinite(value)) throttle = std::clamp(value, 0.0f, 1.0f);
     }
+
+    // Sets the terrain data for the simulation, including the heightmap and its properties.
+    // Returns true if the terrain data is valid and successfully set; otherwise, returns false.
     bool setTerrainData(unsigned int dataPointer, int width, int height,
-        float spacingXFeet, float spacingZFeet, float originXFeet, float originZFeet) {
+        float spacingXFeet, float spacingZFeet, float originXFeet, float originZFeet) 
+    {
         if (dataPointer == 0 || width < 2 || height < 2 || width > 4096 || height > 4096 ||
             !std::isfinite(spacingXFeet) || spacingXFeet <= 0.0f ||
             !std::isfinite(spacingZFeet) || spacingZFeet <= 0.0f ||
-            !std::isfinite(originXFeet) || !std::isfinite(originZFeet)) {
+            !std::isfinite(originXFeet) || !std::isfinite(originZFeet))
+        {
             return false;
         }
 
@@ -365,6 +313,7 @@ public:
         terrainOriginZFeet = originZFeet;
         return true;
     }
+
     void clearTerrainData() {
         terrainHeightsMeters.clear();
         terrainWidth = 0;
@@ -374,8 +323,9 @@ public:
     float getPosX() const { return posX; }
     float getAltitude() const { return altitude; }
     float getPosZ() const { return posZ; }
-    float getGroundElevation() const {
-        return sampleTerrainMeters(posX, posZ) * metersToFeet;
+    float getGroundElevation() const 
+    {
+        return sampleTerrainMeters(posX, posZ) * M_to_F;
     }
     float getAirspeed() const { return airspeed; }
     float getThrottle() const { return throttle * 100.0f; }
