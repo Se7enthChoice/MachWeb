@@ -43,6 +43,7 @@ const MAX_REMOTE_SAMPLES = 20;
 const REMOTE_AIRCRAFT_COLORS = [0x38bdf8, 0xfbbf24, 0xf472b6, 0xa3e635, 0xc084fc];
 const TERRAIN_MESH_SEGMENTS = 64;
 const TERRAIN_MESHES_PER_FRAME = 4;
+const TERRAIN_TEXTURES_PER_FRAME = 4;
 const MAX_CONCURRENT_IMAGERY_REQUESTS = 8;
 const CELESTIAL_DISTANCE = 1800;
 const LIGHT_DISTANCE = 1600;
@@ -250,6 +251,7 @@ export default function FlightViewport({
 }: FlightViewportProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const simulationTimeRef = useRef(simulationTimeMinutes);
   const terrainOriginRef = useRef(terrainOrigin);
@@ -283,6 +285,7 @@ export default function FlightViewport({
 
     // 3. Renderer
     const renderer = new THREE.WebGLRenderer({ antialias: true });
+    rendererRef.current = renderer;
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.setSize(width, height);
@@ -502,6 +505,7 @@ export default function FlightViewport({
       });
       renderer.domElement.remove();
       renderer.dispose();
+      rendererRef.current = null;
       sceneRef.current = null;
       fallbackGroundRef.current = null;
       remoteAircrafts.clear();
@@ -520,7 +524,8 @@ export default function FlightViewport({
   useEffect(() => {
     const scene = sceneRef.current;
     const fallbackGround = fallbackGroundRef.current;
-    if (!scene || !fallbackGround) return;
+    const renderer = rendererRef.current;
+    if (!scene || !fallbackGround || !renderer) return;
     if (!terrainGrid) {
       fallbackGround.visible = true;
       terrainMeshesRef.current.forEach(mesh => {
@@ -540,8 +545,11 @@ export default function FlightViewport({
     const sampleStride = terrainGrid.tileSize / TERRAIN_MESH_SEGMENTS;
     let cancelled = false;
     let meshesCommitted = false;
-    let frameId = 0;
+    let meshFrameId = 0;
+    let textureFrameId = 0;
     let nextTileIndex = 0;
+    const pendingTextures: THREE.Texture[] = [];
+    let imageryLoaded = false;
 
     const disposeMeshes = (
       meshes: Array<THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial>>,
@@ -631,7 +639,7 @@ export default function FlightViewport({
       }
 
       if (nextTileIndex < tileCount) {
-        frameId = requestAnimationFrame(buildMeshes);
+        meshFrameId = requestAnimationFrame(buildMeshes);
         return;
       }
 
@@ -640,6 +648,42 @@ export default function FlightViewport({
       let nextImageryIndex = 0;
       let completedTiles = 0;
       let failedTiles = 0;
+
+      const commitMeshes = () => {
+        if (cancelled || meshesCommitted || !imageryLoaded || pendingTextures.length > 0) return;
+        disposeMeshes(terrainMeshesRef.current);
+        tileMeshes.forEach(mesh => scene.add(mesh));
+        terrainMeshesRef.current = tileMeshes;
+        fallbackGround.visible = false;
+        meshesCommitted = true;
+        setImageryProgress({
+          grid: terrainGrid,
+          status:
+            failedTiles === 0
+              ? 'ready'
+              : `partial (${failedTiles} tile${failedTiles === 1 ? '' : 's'} unavailable)`,
+        });
+      };
+
+      const uploadTextureBatch = () => {
+        textureFrameId = 0;
+        if (cancelled) return;
+        for (let count = 0; count < TERRAIN_TEXTURES_PER_FRAME; count += 1) {
+          const texture = pendingTextures.shift();
+          if (!texture) break;
+          renderer.initTexture(texture);
+        }
+        if (pendingTextures.length > 0) {
+          textureFrameId = requestAnimationFrame(uploadTextureBatch);
+        } else {
+          commitMeshes();
+        }
+      };
+
+      const queueTextureUpload = (texture: THREE.Texture) => {
+        pendingTextures.push(texture);
+        if (!textureFrameId) textureFrameId = requestAnimationFrame(uploadTextureBatch);
+      };
 
       const loadImageryWorker = async () => {
         while (!cancelled) {
@@ -665,6 +709,7 @@ export default function FlightViewport({
             material.map = texture;
             material.vertexColors = false;
             material.needsUpdate = true;
+            queueTextureUpload(texture);
           } catch {
             failedTiles += 1;
           } finally {
@@ -686,26 +731,17 @@ export default function FlightViewport({
         ),
       ).then(() => {
         if (cancelled) return;
-        disposeMeshes(terrainMeshesRef.current);
-        tileMeshes.forEach(mesh => scene.add(mesh));
-        terrainMeshesRef.current = tileMeshes;
-        fallbackGround.visible = false;
-        meshesCommitted = true;
-        setImageryProgress({
-          grid: terrainGrid,
-          status:
-            failedTiles === 0
-              ? 'ready'
-              : `partial (${failedTiles} tile${failedTiles === 1 ? '' : 's'} unavailable)`,
-        });
+        imageryLoaded = true;
+        commitMeshes();
       });
     };
 
-    frameId = requestAnimationFrame(buildMeshes);
+    meshFrameId = requestAnimationFrame(buildMeshes);
 
     return () => {
       cancelled = true;
-      cancelAnimationFrame(frameId);
+      cancelAnimationFrame(meshFrameId);
+      cancelAnimationFrame(textureFrameId);
       if (!meshesCommitted) disposeMeshes(tileMeshes);
     };
   }, [terrainGrid]);
