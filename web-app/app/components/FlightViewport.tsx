@@ -42,6 +42,7 @@ const REMOTE_INTERPOLATION_DELAY_MS = 150;
 const MAX_REMOTE_SAMPLES = 20;
 const REMOTE_AIRCRAFT_COLORS = [0x38bdf8, 0xfbbf24, 0xf472b6, 0xa3e635, 0xc084fc];
 const TERRAIN_MESH_SEGMENTS = 64;
+const TERRAIN_MESHES_PER_FRAME = 4;
 const MAX_CONCURRENT_IMAGERY_REQUESTS = 8;
 const CELESTIAL_DISTANCE = 1800;
 const LIGHT_DISTANCE = 1600;
@@ -433,10 +434,29 @@ export default function FlightViewport({
     const tileMeshes: Array<
       THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial>
     > = [];
-    // Sample every fourth raster pixel so wider terrain stays near the original vertex budget.
     const sampleStride = terrainGrid.tileSize / TERRAIN_MESH_SEGMENTS;
-    for (let tileRow = 0; tileRow < terrainGrid.tileRows; tileRow += 1) {
-      for (let tileColumn = 0; tileColumn < terrainGrid.tileColumns; tileColumn += 1) {
+    let cancelled = false;
+    let meshesCommitted = false;
+    let frameId = 0;
+    let nextTileIndex = 0;
+
+    const disposeMeshes = (
+      meshes: Array<THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial>>,
+    ) => {
+      meshes.forEach(mesh => {
+        scene.remove(mesh);
+        mesh.geometry.dispose();
+        if (mesh.material.map) mesh.material.map.dispose();
+        mesh.material.dispose();
+      });
+    };
+
+    const buildMeshes = () => {
+      const tileCount = terrainGrid.tileRows * terrainGrid.tileColumns;
+      const batchEnd = Math.min(nextTileIndex + TERRAIN_MESHES_PER_FRAME, tileCount);
+      for (; nextTileIndex < batchEnd; nextTileIndex += 1) {
+        const tileRow = Math.floor(nextTileIndex / terrainGrid.tileColumns);
+        const tileColumn = nextTileIndex % terrainGrid.tileColumns;
         const geometry = new THREE.PlaneGeometry(
           terrainGrid.tileSize * terrainGrid.spacingXFeet * visualScale,
           terrainGrid.tileSize * terrainGrid.spacingZFeet * visualScale,
@@ -484,89 +504,86 @@ export default function FlightViewport({
           (terrainGrid.originZFeet +
             (tileRow + 0.5) * terrainGrid.tileSize * terrainGrid.spacingZFeet) * visualScale,
         );
-        scene.add(mesh);
         tileMeshes.push(mesh);
       }
-    }
 
-    terrainMeshesRef.current.forEach(mesh => {
-      scene.remove(mesh);
-      mesh.geometry.dispose();
-      if (mesh.material.map) mesh.material.map.dispose();
-      mesh.material.dispose();
-    });
-    terrainMeshesRef.current = tileMeshes;
-    fallbackGround.visible = false;
-    let cancelled = false;
-    const textureLoader = new THREE.TextureLoader();
-    textureLoader.setCrossOrigin('anonymous');
-    let nextTileIndex = 0;
-    let completedTiles = 0;
-    let failedTiles = 0;
+      if (nextTileIndex < tileCount) {
+        frameId = requestAnimationFrame(buildMeshes);
+        return;
+      }
 
-    const loadImageryWorker = async () => {
-      while (!cancelled) {
-        const index = nextTileIndex;
-        nextTileIndex += 1;
-        if (index >= terrainGrid.satelliteTiles.length) return;
+      const textureLoader = new THREE.TextureLoader();
+      textureLoader.setCrossOrigin('anonymous');
+      let nextImageryIndex = 0;
+      let completedTiles = 0;
+      let failedTiles = 0;
 
-        try {
-          const texture = await textureLoader.loadAsync(
-            getSatelliteTileUrl(terrainGrid.satelliteTiles[index]),
-          );
-          if (cancelled) {
-            texture.dispose();
-            continue;
-          }
+      const loadImageryWorker = async () => {
+        while (!cancelled) {
+          const index = nextImageryIndex;
+          nextImageryIndex += 1;
+          if (index >= terrainGrid.satelliteTiles.length) return;
 
-          texture.generateMipmaps = true;
-          texture.minFilter = THREE.LinearMipmapLinearFilter;
-          texture.magFilter = THREE.LinearFilter;
-          texture.colorSpace = THREE.SRGBColorSpace;
+          try {
+            const texture = await textureLoader.loadAsync(
+              getSatelliteTileUrl(terrainGrid.satelliteTiles[index]),
+            );
+            if (cancelled) {
+              texture.dispose();
+              continue;
+            }
 
-          const material = tileMeshes[index].material;
-          material.map = texture;
-          material.vertexColors = false;
-          material.needsUpdate = true;
-        } catch {
-          failedTiles += 1;
-        } finally {
-          completedTiles += 1;
-          if (!cancelled && completedTiles % 16 === 0) {
-            setImageryProgress({
-              grid: terrainGrid,
-              status: `loading ${completedTiles}/${terrainGrid.satelliteTiles.length}`,
-            });
+            texture.generateMipmaps = true;
+            texture.minFilter = THREE.LinearMipmapLinearFilter;
+            texture.magFilter = THREE.LinearFilter;
+            texture.colorSpace = THREE.SRGBColorSpace;
+
+            const material = tileMeshes[index].material;
+            material.map = texture;
+            material.vertexColors = false;
+            material.needsUpdate = true;
+          } catch {
+            failedTiles += 1;
+          } finally {
+            completedTiles += 1;
+            if (!cancelled && completedTiles % 16 === 0) {
+              setImageryProgress({
+                grid: terrainGrid,
+                status: `loading ${completedTiles}/${terrainGrid.satelliteTiles.length}`,
+              });
+            }
           }
         }
-      }
+      };
+
+      Promise.all(
+        Array.from(
+          { length: Math.min(MAX_CONCURRENT_IMAGERY_REQUESTS, terrainGrid.satelliteTiles.length) },
+          () => loadImageryWorker(),
+        ),
+      ).then(() => {
+        if (cancelled) return;
+        disposeMeshes(terrainMeshesRef.current);
+        tileMeshes.forEach(mesh => scene.add(mesh));
+        terrainMeshesRef.current = tileMeshes;
+        fallbackGround.visible = false;
+        meshesCommitted = true;
+        setImageryProgress({
+          grid: terrainGrid,
+          status:
+            failedTiles === 0
+              ? 'ready'
+              : `partial (${failedTiles} tile${failedTiles === 1 ? '' : 's'} unavailable)`,
+        });
+      });
     };
 
-    Promise.all(
-      Array.from(
-        { length: Math.min(MAX_CONCURRENT_IMAGERY_REQUESTS, terrainGrid.satelliteTiles.length) },
-        () => loadImageryWorker(),
-      ),
-    ).then(() => {
-      if (cancelled) return;
-      setImageryProgress({
-        grid: terrainGrid,
-        status:
-          failedTiles === 0
-            ? 'ready'
-            : `partial (${failedTiles} tile${failedTiles === 1 ? '' : 's'} unavailable)`,
-      });
-    });
+    frameId = requestAnimationFrame(buildMeshes);
 
     return () => {
       cancelled = true;
-      tileMeshes.forEach(mesh => {
-        scene.remove(mesh);
-        mesh.geometry.dispose();
-        if (mesh.material.map) mesh.material.map.dispose();
-        mesh.material.dispose();
-      });
-      if (terrainMeshesRef.current === tileMeshes) terrainMeshesRef.current = [];
+      cancelAnimationFrame(frameId);
+      if (!meshesCommitted) disposeMeshes(tileMeshes);
     };
   }, [terrainGrid]);
 
