@@ -10,7 +10,7 @@ export interface FlightTelemetry {
   airspeed: number;
   throttle: number;
   verticalSpeed: number;
-  stalled: boolean;
+  crashed: boolean;
   latitude: number;
   longitude: number;
   sequence: number;
@@ -94,7 +94,7 @@ function isFlightTelemetry(value: unknown): value is FlightTelemetry {
     return false;
   }
   if (typeof value.isHost !== 'boolean') return false;
-  const numericFields: Array<keyof Omit<FlightTelemetry, 'stalled'>> = [
+  const numericFields: Array<keyof Omit<FlightTelemetry, 'crashed'>> = [
     'posX',
     'posZ',
     'altitude',
@@ -117,7 +117,7 @@ function isFlightTelemetry(value: unknown): value is FlightTelemetry {
     typeof value.sequence === 'number' &&
     Number.isSafeInteger(value.sequence) &&
     value.sequence >= 0 &&
-    typeof value.stalled === 'boolean'
+    typeof value.crashed === 'boolean'
   );
 }
 

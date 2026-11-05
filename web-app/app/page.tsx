@@ -46,7 +46,7 @@ interface SimEngineInstance {
   getRoll(): number;
   getHeading(): number;
   getVerticalSpeed(): number;
-  getStalled(): boolean;
+  getCrashed(): boolean;
   delete(): void;
 }
 
@@ -104,7 +104,7 @@ export default function Home() {
   const [roll, setRoll] = useState<number>(0);
   const [heading, setHeading] = useState<number>(0);
   const [vSpeed, setVSpeed] = useState<number>(0);
-  const [stalled, setStalled] = useState(false);
+  const [crashed, setCrashed] = useState(false);
   const [posX, setPosX] = useState<number>(0);
   const [posZ, setPosZ] = useState<number>(0);
   const [status, setStatus] = useState<string>('Initializing flight dynamics...');
@@ -467,7 +467,7 @@ export default function Home() {
     setRoll(0);
     setHeading(0);
     setVSpeed(0);
-    setStalled(false);
+    setCrashed(false);
   };
 
   useEffect(() => () => {
@@ -591,8 +591,8 @@ export default function Home() {
             setRoll(nextRoll);
             setHeading(nextHeading);
             setVSpeed(nextVSpeed);
-            const nextStalled = engineInstance.getStalled();
-            setStalled(nextStalled);
+            const nextCrashed = engineInstance.getCrashed();
+            setCrashed(nextCrashed);
 
             telemetrySendElapsed += clampedDt;
             const openChannels = Array.from(dataChannelsRef.current.values())
@@ -617,7 +617,7 @@ export default function Home() {
                 airspeed: nextAirspeed,
                 throttle: nextThrottle,
                 verticalSpeed: nextVSpeed,
-                stalled: nextStalled,
+                crashed: nextCrashed,
                 ...aircraftCoordinates,
                 sequence: telemetrySequenceRef.current,
                 simulationTimeMinutes: simulationTimeRef.current,
@@ -792,7 +792,7 @@ export default function Home() {
             roll={roll}
             heading={heading}
             airspeed={airspeed}
-            stalled={stalled}
+            crashed={crashed}
             remoteTelemetries={Object.values(remoteTelemetryByPlayer)}
             terrainOrigin={terrainOrigin}
             terrainGrid={terrainGrid}

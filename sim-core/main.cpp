@@ -20,8 +20,8 @@ private:
     static constexpr float metersToFeet = 3.28084f;
     static constexpr float maxAirspeed = 850.0f;
     static constexpr float maxVerticalSpeed = 19600.0f;
-    static constexpr float stallSpeed = 120.0f;
     static constexpr float cruiseAirspeed = 300.0f;
+    static constexpr float crashDuration = 3.0f;
 
     float posX = 0.0f;
     float altitude = 5000.0f;
@@ -31,6 +31,8 @@ private:
     float velocityZ = -300.0f * ktsToFeetPerSecond;
     float airspeed = 300.0f;
     float throttle = 0.43f;
+    float crashTimeRemaining = 0.0f;
+    bool onGround = false;
     std::vector<float> terrainHeightsMeters;
     int terrainWidth = 0;
     int terrainHeight = 0;
@@ -161,6 +163,7 @@ public:
     void tick(float dt) {
         if (!std::isfinite(dt) || dt <= 0.0f) return;
         dt = std::min(dt, 0.1f);
+        crashTimeRemaining = std::max(0.0f, crashTimeRemaining - dt);
 
         float speedFeetPerSecond = std::sqrt(
             velocityX * velocityX + velocityY * velocityY + velocityZ * velocityZ);
@@ -318,9 +321,13 @@ public:
 
         const float groundElevation = getGroundElevation();
         if (altitude <= groundElevation && velocityY < 0.0f) {
+            if (!onGround) crashTimeRemaining = crashDuration;
             altitude = groundElevation;
             velocityY = 0.0f;
             verticalSpeed = 0.0f;
+            onGround = true;
+        } else {
+            onGround = false;
         }
     }
 
@@ -376,7 +383,7 @@ public:
     float getRoll() const { return rollAngle; }
     float getHeading() const { return heading; }
     float getVerticalSpeed() const { return verticalSpeed; }
-    bool getStalled() const { return airspeed < stallSpeed; }
+    bool getCrashed() const { return crashTimeRemaining > 0.0f; }
 };
 
 EMSCRIPTEN_BINDINGS(sim_engine) {
@@ -399,5 +406,5 @@ EMSCRIPTEN_BINDINGS(sim_engine) {
         .function("getRoll", &SimEngine::getRoll)
         .function("getHeading", &SimEngine::getHeading)
         .function("getVerticalSpeed", &SimEngine::getVerticalSpeed)
-        .function("getStalled", &SimEngine::getStalled);
+        .function("getCrashed", &SimEngine::getCrashed);
 }

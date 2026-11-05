@@ -14,7 +14,7 @@ interface FlightViewportProps {
   roll: number;
   heading: number;
   airspeed: number;
-  stalled: boolean;
+  crashed: boolean;
   remoteTelemetries: FlightTelemetry[];
   terrainOrigin: TerrainOrigin;
   terrainGrid: TerrainGrid | null;
@@ -47,7 +47,7 @@ const MAX_CONCURRENT_IMAGERY_REQUESTS = 8;
 const CELESTIAL_DISTANCE = 1800;
 const LIGHT_DISTANCE = 1600;
 const FOG_NEAR = 300;
-const FOG_FAR = 1300;
+const FOG_FAR = 1100;
 const NIGHT_SKY = new THREE.Color(0x071225);
 const TWILIGHT_SKY = new THREE.Color(0xe59a72);
 const DAY_SKY = new THREE.Color(0x79b9dc);
@@ -166,7 +166,7 @@ export default function FlightViewport({
   roll,
   heading,
   airspeed,
-  stalled,
+  crashed,
   remoteTelemetries,
   terrainOrigin,
   terrainGrid,
@@ -465,6 +465,7 @@ export default function FlightViewport({
         );
         const positions = geometry.attributes.position;
         const colors = new Float32Array(positions.count * 3);
+        const normals = new Float32Array(positions.count * 3);
         for (let row = 0; row <= TERRAIN_MESH_SEGMENTS; row += 1) {
           for (let column = 0; column <= TERRAIN_MESH_SEGMENTS; column += 1) {
             const index = row * (TERRAIN_MESH_SEGMENTS + 1) + column;
@@ -479,6 +480,25 @@ export default function FlightViewport({
             const elevationMeters = heightsMeters[gridY * width + gridX];
             positions.setZ(index, elevationMeters * feetPerMeter * visualScale);
 
+            const leftX = Math.max(gridX - sampleStride, 0);
+            const rightX = Math.min(gridX + sampleStride, width - 1);
+            const northY = Math.max(gridY - sampleStride, 0);
+            const southY = Math.min(gridY + sampleStride, height - 1);
+            const slopeX =
+              ((heightsMeters[gridY * width + rightX] -
+                heightsMeters[gridY * width + leftX]) *
+                feetPerMeter) /
+              ((rightX - leftX) * terrainGrid.spacingXFeet);
+            const slopeZ =
+              ((heightsMeters[southY * width + gridX] -
+                heightsMeters[northY * width + gridX]) *
+                feetPerMeter) /
+              ((southY - northY) * terrainGrid.spacingZFeet);
+            const normalLength = Math.hypot(slopeX, slopeZ, 1);
+            normals[index * 3] = -slopeX / normalLength;
+            normals[index * 3 + 1] = slopeZ / normalLength;
+            normals[index * 3 + 2] = 1 / normalLength;
+
             const color = terrainColor(elevationMeters);
             colors[index * 3] = color.r;
             colors[index * 3 + 1] = color.g;
@@ -487,7 +507,7 @@ export default function FlightViewport({
         }
         positions.needsUpdate = true;
         geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-        geometry.computeVertexNormals();
+        geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
 
         const material = new THREE.MeshLambertMaterial({
           vertexColors: true,
@@ -495,7 +515,7 @@ export default function FlightViewport({
         });
         const mesh = new THREE.Mesh(geometry, material);
         mesh.rotation.x = -Math.PI / 2;
-        mesh.castShadow = true;
+        mesh.castShadow = false;
         mesh.receiveShadow = true;
         mesh.position.set(
           (terrainGrid.originXFeet +
@@ -670,9 +690,9 @@ export default function FlightViewport({
         LOCAL TIME {Math.floor(simulationTimeMinutes / 60).toString().padStart(2, '0')}:
         {Math.floor(simulationTimeMinutes % 60).toString().padStart(2, '0')}
       </div>
-      {stalled && (
+      {crashed && (
         <div className="pointer-events-none absolute right-3 top-3 rounded border border-red-500/60 bg-red-950/85 px-3 py-1 font-mono text-sm font-bold tracking-widest text-red-300 backdrop-blur">
-          STALL
+          CRASHED
         </div>
       )}
       <div className="pointer-events-none absolute bottom-3 right-3 rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 font-mono text-xs text-zinc-200 backdrop-blur">
