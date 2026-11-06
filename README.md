@@ -5,18 +5,45 @@ A browser-native first-person 6DOF flight simulator. Its C++ flight dynamics cor
 
 ```text
 MachWeb/
-├── sim-core/              # C++23 physics simulation core & CMake project
-│
-│   ├── main.cpp           # Flight dynamics model & Embind bindings
-│
-│   └── CMakeLists.txt     # Emscripten-compatible CMake config
-│
-├── web-app/               # Next.js & TypeScript frontend dashboard
-│
-│   └── public/wasm/       # Compiled Wasm binaries output directory
-│
-└── build.ps1              # Automated PowerShell build script
+├── sim-core/                         # C++23 simulation core compiled to WebAssembly
+│   ├── main.cpp                      # SimEngine facade and Embind API exposed to JavaScript
+│   ├── env_terrain.cpp               # Terrain heightmap validation, caching, and sampling
+│   ├── env_terrain.h                 # Terrain subsystem interface and grid state
+│   ├── fm_aircraft.cpp               # Aircraft state updates, controls, and flight dynamics
+│   ├── fm_aircraft.h                 # Flight model interface and aircraft state
+│   ├── ws_systems.cpp                # Weapon-system update stub
+│   ├── ws_systems.h                  # Weapon-system interface
+│   ├── utils.h                       # Shared constants and vector/angle math helpers
+│   ├── CMakeLists.txt                # CMake target and Emscripten linker configuration
+│   └── build/                        # Generated CMake/Ninja output (created by the build)
+├── web-app/                          # Next.js, React, and TypeScript frontend
+│   ├── app/
+│   │   ├── page.tsx                  # Preflight, simulation lifecycle, WASM and multiplayer coordination
+│   │   ├── terrain.ts                # Geographic conversion and terrain/imagery tile loading
+│   │   ├── webrtc.ts                 # Signaling-description encoding and multiplayer message validation
+│   │   ├── layout.tsx                # Root document layout, fonts, and metadata
+│   │   ├── globals.css               # Global styles and Tailwind CSS entry point
+│   │   ├── favicon.ico               # Application favicon
+│   │   └── components/
+│   │       ├── PreflightScreen.tsx   # Flight setup and multiplayer connection UI
+│   │       └── FlightViewport.tsx    # Three.js cockpit view, terrain, lighting, and remote aircraft
+│   ├── public/wasm/
+│   │   ├── sim-core.js               # Generated Emscripten JavaScript loader
+│   │   └── sim-core.wasm             # Generated WebAssembly simulation binary
+│   ├── package.json                  # Frontend dependencies and development scripts
+│   ├── package-lock.json             # Locked npm dependency versions
+│   ├── next.config.ts                # Next.js configuration
+│   ├── eslint.config.mjs             # ESLint configuration
+│   ├── tsconfig.json                 # TypeScript configuration
+│   ├── next-env.d.ts                 # Next.js TypeScript environment declarations
+│   └── AGENTS.md                     # Next.js-generated guidance for coding agents
+└── build.ps1                         # Builds the Wasm core and copies artifacts into web-app/public/wasm
 ```
+
+The C++ core is divided by subsystem prefix: `env_` for environmental data, `fm_` for flight
+model and controls, and `ws_` for weapon systems. `main.cpp` coordinates these modules and
+preserves the JavaScript-facing `SimEngine` API. The frontend loads the compiled core, supplies
+terrain and control inputs, and renders local and multiplayer flight state.
 
 ## Prerequisites
 Before setting up the repository on a fresh Windows machine, ensure you have the following installed:
@@ -131,6 +158,6 @@ The connection uses Google's public STUN service to discover network addresses. 
 
 ## Development Workflow
 
-Modifying Physics (`sim-core/main.cpp`): Edit your C++ simulation logic, then run `./build.ps1` from the root folder to recompile. Refresh your browser to see the updates instantly.
+Modifying Flight Dynamics (`sim-core/fm_aircraft.cpp`): Edit aircraft controls or flight-model behavior, then run `./build.ps1` from the root folder to recompile. Terrain behavior belongs in `sim-core/env_terrain.cpp`; `sim-core/main.cpp` is the subsystem facade and WebAssembly binding.
 
-Modifying UI/Dashboard (`web-app/app/page.tsx`): Next.js handles hot-reloading for all TypeScript/React frontend code automatically.
+Modifying UI/Dashboard (`web-app/app/page.tsx`): Next.js handles hot-reloading for TypeScript/React frontend code automatically. Terrain loading and WebRTC message helpers live in `terrain.ts` and `webrtc.ts`, while the preflight UI and 3D viewport are in `app/components/`.

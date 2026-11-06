@@ -34,6 +34,7 @@ interface PreflightScreenProps {
   onSubmit(event: FormEvent<HTMLFormElement>): void;
 }
 
+// Presents flight setup and multiplayer signaling controls through controlled props.
 export default function PreflightScreen({
   multiplayerRole,
   multiplayerStatus,
@@ -58,6 +59,7 @@ export default function PreflightScreen({
   onInitialTimeChange,
   onSubmit,
 }: PreflightScreenProps) {
+  // Forwards the edited latitude value to the owning page component.
   const handleLatitudeChange = (event: ChangeEvent<HTMLInputElement>) => {
     onLatitudeChange(event.target.value);
   };

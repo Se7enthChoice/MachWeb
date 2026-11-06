@@ -4,7 +4,12 @@ project(SimCore)
 set(CMAKE_CXX_STANDARD 23)
 
 # Define the target executable
-add_executable(sim-core main.cpp)
+add_executable(sim-core
+    main.cpp
+    env_terrain.cpp
+    fm_aircraft.cpp
+    ws_systems.cpp
+)
 
 # Emscripten specific link flags
 target_link_options(sim-core PRIVATE

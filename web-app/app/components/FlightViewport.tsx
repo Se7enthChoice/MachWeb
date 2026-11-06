@@ -63,6 +63,7 @@ const terrainColors = [
   new THREE.Color(0xd7d8d1),
 ];
 
+// Selects a fallback vertex color based on terrain elevation in meters.
 function terrainColor(elevationMeters: number): THREE.Color {
   if (elevationMeters < 0) return terrainColors[0]; 
   if (elevationMeters < 300) return terrainColors[1];
@@ -72,11 +73,13 @@ function terrainColor(elevationMeters: number): THREE.Color {
   return terrainColors[5];
 }
 
+// Interpolates angles over the shortest path across the 0/360-degree boundary.
 function interpolateAngle(start: number, end: number, amount: number): number {
   const delta = THREE.MathUtils.euclideanModulo(end - start + 180, 360) - 180;
   return start + delta * amount;
 }
 
+// Estimates the sun's elevation and azimuth for local time and position.
 function getSolarPosition(
   date: Date,
   latitude: number,
@@ -152,6 +155,7 @@ function getSolarPosition(
   return { elevation, azimuth };
 }
 
+// Builds a lightweight remote-aircraft model and its navigation lights.
 function createRemoteAircraft(color: number): { aircraft: THREE.Group; lights: THREE.Group } {
   const aircraft = new THREE.Group();
   const lights = new THREE.Group();
@@ -215,6 +219,7 @@ function createRemoteAircraft(color: number): { aircraft: THREE.Group; lights: T
   return { aircraft, lights };
 }
 
+// Releases geometry and material resources owned by a remote-aircraft model.
 function disposeRemoteAircraft(aircraft: THREE.Group): void {
   aircraft.traverse(object => {
     if (!(object instanceof THREE.Mesh)) return;
@@ -224,6 +229,7 @@ function disposeRemoteAircraft(aircraft: THREE.Group): void {
   });
 }
 
+// Assigns a stable palette color to each multiplayer player ID.
 function getPlayerAircraftColor(playerId: string): number {
   let hash = 0;
   for (let index = 0; index < playerId.length; index += 1) {
@@ -234,6 +240,7 @@ function getPlayerAircraftColor(playerId: string): number {
   return REMOTE_AIRCRAFT_COLORS[colorIndex];
 }
 
+// Renders the cockpit view, terrain, sky lighting, and interpolated remote aircraft.
 export default function FlightViewport({
   posX,
   posZ,
@@ -265,6 +272,7 @@ export default function FlightViewport({
     status: string;
   } | null>(null);
 
+  // Creates and tears down the Three.js scene and its animation loop.
   useEffect(() => {
     const currentMount = mountRef.current;
     if (!currentMount) return;
@@ -370,6 +378,7 @@ export default function FlightViewport({
     resizeObserver.observe(currentMount);
 
     let animId: number;
+    // Interpolates remote traffic and updates time-dependent lighting each frame.
     const animate = () => {
       animId = requestAnimationFrame(animate);
       const timeMinutes = simulationTimeRef.current;
@@ -513,14 +522,17 @@ export default function FlightViewport({
     };
   }, []);
 
+  // Keeps the displayed simulation time available to the render loop.
   useEffect(() => {
     simulationTimeRef.current = simulationTimeMinutes;
   }, [simulationTimeMinutes]);
 
+  // Keeps geographic conversion aligned with the latest flight origin.
   useEffect(() => {
     terrainOriginRef.current = terrainOrigin;
   }, [terrainOrigin]);
 
+  // Builds terrain meshes and progressively loads imagery without blocking frames.
   useEffect(() => {
     const scene = sceneRef.current;
     const fallbackGround = fallbackGroundRef.current;
@@ -551,6 +563,7 @@ export default function FlightViewport({
     const pendingTextures: THREE.Texture[] = [];
     let imageryLoaded = false;
 
+    // Removes a set of meshes and releases their GPU resources.
     const disposeMeshes = (
       meshes: Array<THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial>>,
     ) => {
@@ -562,6 +575,7 @@ export default function FlightViewport({
       });
     };
 
+    // Creates terrain geometry in small frame-sized batches.
     const buildMeshes = () => {
       const tileCount = terrainGrid.tileRows * terrainGrid.tileColumns;
       const batchEnd = Math.min(nextTileIndex + TERRAIN_MESHES_PER_FRAME, tileCount);
@@ -649,6 +663,7 @@ export default function FlightViewport({
       let completedTiles = 0;
       let failedTiles = 0;
 
+      // Replaces the fallback ground after geometry and texture uploads are ready.
       const commitMeshes = () => {
         if (cancelled || meshesCommitted || !imageryLoaded || pendingTextures.length > 0) return;
         disposeMeshes(terrainMeshesRef.current);
@@ -665,6 +680,7 @@ export default function FlightViewport({
         });
       };
 
+      // Limits texture uploads per frame to reduce rendering stalls.
       const uploadTextureBatch = () => {
         textureFrameId = 0;
         if (cancelled) return;
@@ -685,6 +701,7 @@ export default function FlightViewport({
         if (!textureFrameId) textureFrameId = requestAnimationFrame(uploadTextureBatch);
       };
 
+      // Loads imagery tiles from a bounded pool of concurrent workers.
       const loadImageryWorker = async () => {
         while (!cancelled) {
           const index = nextImageryIndex;
@@ -746,6 +763,7 @@ export default function FlightViewport({
     };
   }, [terrainGrid]);
 
+  // Applies simulator position and attitude to the first-person camera.
   useEffect(() => {
     if (!cameraRef.current) return;
 
@@ -759,6 +777,7 @@ export default function FlightViewport({
     cameraRef.current.rotation.z = -THREE.MathUtils.degToRad(roll);
   }, [posX, posZ, altitude, pitch, roll, heading]);
 
+  // Creates/removes remote aircraft and buffers fresh samples for interpolation.
   useEffect(() => {
     const scene = sceneRef.current;
     if (!scene) return;

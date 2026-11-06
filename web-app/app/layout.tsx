@@ -17,6 +17,7 @@ export const metadata: Metadata = {
   description: "A first-person 6DOF flight simulator powered by WebAssembly.",
 };
 
+// Provides the shared document shell, fonts, and page metadata.
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html

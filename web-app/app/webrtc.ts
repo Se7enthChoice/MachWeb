@@ -17,6 +17,7 @@ export interface FlightTelemetry {
   simulationTimeMinutes: number;
 }
 
+// Encodes a WebRTC description as a UTF-8-safe Base64 string for manual exchange.
 export function encodeSessionDescription(description: RTCSessionDescriptionInit): string {
   const bytes = new TextEncoder().encode(
     JSON.stringify({ type: description.type, sdp: description.sdp }),
@@ -28,6 +29,7 @@ export function encodeSessionDescription(description: RTCSessionDescriptionInit)
   return btoa(binary);
 }
 
+// Decodes and validates a manually exchanged WebRTC offer or answer.
 export function decodeSessionDescription(
   encoded: string,
   expectedType: 'offer' | 'answer',
@@ -54,6 +56,7 @@ export function decodeSessionDescription(
   }
 }
 
+// Resolves once ICE candidates are gathered, or rejects if gathering closes or times out.
 export function waitForIceGatheringComplete(
   connection: RTCPeerConnection,
   timeoutMs = 30_000,
@@ -84,10 +87,12 @@ export function waitForIceGatheringComplete(
   });
 }
 
+// Narrows untrusted parsed JSON to a non-null object record.
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+// Validates the complete telemetry payload before it is used or relayed.
 function isFlightTelemetry(value: unknown): value is FlightTelemetry {
   if (!isRecord(value)) return false;
   if (typeof value.playerId !== 'string' || value.playerId.length === 0 || value.playerId.length > 64) {
@@ -121,6 +126,7 @@ function isFlightTelemetry(value: unknown): value is FlightTelemetry {
   );
 }
 
+// Parses a host-time message, returning null for malformed or out-of-range data.
 export function parseFlightTimeMessage(
   message: string,
 ): { minutes: number; sequence: number } | null {
@@ -146,6 +152,7 @@ export function parseFlightTimeMessage(
   }
 }
 
+// Parses and validates a telemetry envelope received over a data channel.
 export function parseFlightTelemetryMessage(message: string): FlightTelemetry | null {
   try {
     const parsed: unknown = JSON.parse(message);

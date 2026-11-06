@@ -65,6 +65,7 @@ type SimEngineModuleFactory = (options: {
 const DEFAULT_LATITUDE = 51.5000;
 const DEFAULT_LONGITUDE = -2.5833;
 
+// Formats elapsed simulation minutes as a zero-padded 24-hour clock.
 function formatTimeOfDay(totalMinutes: number): string {
   const wholeMinutes = Math.floor(totalMinutes) % (24 * 60);
   const hours = Math.floor(wholeMinutes / 60);
@@ -72,6 +73,7 @@ function formatTimeOfDay(totalMinutes: number): string {
   return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
 }
 
+// Owns preflight state, the Wasm simulation loop, and multiplayer coordination.
 export default function Home() {
   const [latitudeInput, setLatitudeInput] = useState(String(DEFAULT_LATITUDE));
   const [longitudeInput, setLongitudeInput] = useState(String(DEFAULT_LONGITUDE));
@@ -122,6 +124,7 @@ export default function Home() {
   const telemetrySequenceRef = useRef(0);
   const terrainNeighborhoodKey = getTerrainNeighborhoodKey(terrainOrigin, posX, posZ);
 
+  // Synchronizes connection state and host-facing joiner status.
   const refreshConnectedPeers = () => {
     const connectedCount = Array.from(dataChannelsRef.current.values())
       .filter(channel => channel.readyState === 'open').length;
@@ -135,6 +138,7 @@ export default function Home() {
     }
   };
 
+  // Sends the host's current time with a sequence number for stale-message filtering.
   const sendHostTime = (channel: RTCDataChannel, minutes: number) => {
     if (channel.readyState !== 'open') return;
     const sequence = hostTimeSequenceRef.current;
@@ -147,6 +151,7 @@ export default function Home() {
     }
   };
 
+  // Closes all peer resources and clears multiplayer state.
   const closePeerConnections = () => {
     dataChannelsRef.current.forEach(channel => channel.close());
     peerConnectionsRef.current.forEach(connection => connection.close());
@@ -158,6 +163,7 @@ export default function Home() {
     setMultiplayerConnected(false);
   };
 
+  // Tracks connection lifecycle changes for one signaling session.
   const configurePeerConnection = (
     connection: RTCPeerConnection,
     sessionId: string,
@@ -182,6 +188,7 @@ export default function Home() {
     };
   };
 
+  // Registers data-channel handlers for time and telemetry exchange.
   const configureDataChannel = (
     channel: RTCDataChannel,
     sessionId: string,
@@ -279,6 +286,7 @@ export default function Home() {
     };
   };
 
+  // Updates the selected time and immediately syncs valid host changes to joiners.
   const handleInitialTimeChange = (value: string) => {
     setInitialTimeInput(value);
     if (multiplayerRole !== 'host' || !/^\d{2}:\d{2}$/.test(value)) return;
@@ -287,6 +295,7 @@ export default function Home() {
     dataChannelsRef.current.forEach(channel => sendHostTime(channel, timeOfDayMinutes));
   };
 
+  // Resets signaling state when switching between solo, host, and join modes.
   const handleMultiplayerRoleChange = (role: 'solo' | 'host' | 'join') => {
     closePeerConnections();
     setMultiplayerRole(role);
@@ -295,6 +304,7 @@ export default function Home() {
     setMultiplayerStatus(role === 'solo' ? 'Solo flight' : `Ready to ${role === 'host' ? 'host' : 'join'} a flight.`);
   };
 
+  // Creates a host offer and waits for ICE gathering before exposing it for sharing.
   const handleCreateOffer = async () => {
     if (multiplayerOperationRef.current) return;
     multiplayerOperationRef.current = true;
@@ -338,6 +348,7 @@ export default function Home() {
     }
   };
 
+  // Applies a host offer and creates a shareable joiner answer.
   const handleCreateAnswer = async () => {
     if (multiplayerOperationRef.current) return;
     multiplayerOperationRef.current = true;
@@ -369,6 +380,7 @@ export default function Home() {
     }
   };
 
+  // Applies a joiner's answer to the matching host peer connection.
   const handleApplyAnswer = async (sessionId: string) => {
     if (multiplayerOperationRef.current) return;
     const session = hostPeerSessions.find(candidate => candidate.id === sessionId);
@@ -397,12 +409,14 @@ export default function Home() {
     }
   };
 
+  // Stores the answer text associated with a specific host offer.
   const handleHostAnswerChange = (sessionId: string, answer: string) => {
     setHostPeerSessions(sessions => sessions.map(session =>
       session.id === sessionId ? { ...session, answer } : session,
     ));
   };
 
+  // Validates preflight inputs and initializes state for a new flight.
   const handleStartFlight = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (multiplayerRole !== 'solo' && !multiplayerConnected) {
@@ -446,6 +460,7 @@ export default function Home() {
     setSimulationStarted(true);
   };
 
+  // Closes active sessions and restores the preflight defaults.
   const handleEndFlight = () => {
     closePeerConnections();
     setMultiplayerRole('solo');
@@ -470,11 +485,13 @@ export default function Home() {
     setCrashed(false);
   };
 
+  // Closes outstanding peer resources when the page unmounts.
   useEffect(() => () => {
     dataChannelsRef.current.forEach(channel => channel.close());
     peerConnectionsRef.current.forEach(connection => connection.close());
   }, []);
 
+  // Initializes the preflight clock from the browser's local time.
   useEffect(() => {
     const now = new Date();
     const currentTimeMinutes = now.getHours() * 60 + now.getMinutes();
@@ -487,6 +504,7 @@ export default function Home() {
     return () => window.clearTimeout(timeoutId);
   }, []);
 
+  // Loads the Wasm engine, runs the flight loop, and releases listeners on cleanup.
   useEffect(() => {
     if (!simulationStarted) return;
 
@@ -659,6 +677,7 @@ export default function Home() {
     };
   }, [multiplayerRole, simulationStarted, terrainOrigin]);
 
+  // Advances the local clock unless a connected host controls joiner time.
   useEffect(() => {
     if (!simulationStarted) return;
     if (multiplayerRole === 'join' && multiplayerConnected) return;
@@ -674,14 +693,17 @@ export default function Home() {
     return () => window.clearInterval(intervalId);
   }, [flightStartTimeMinutes, multiplayerConnected, multiplayerRole, simulationStarted]);
 
+  // Keeps the current clock value available to callbacks outside React's render cycle.
   useEffect(() => {
     simulationTimeRef.current = simulationTimeMinutes;
   }, [simulationTimeMinutes]);
 
+  // Tracks the latest simulator position for asynchronous terrain requests.
   useEffect(() => {
     latestPositionRef.current = { posX, posZ };
   }, [posX, posZ]);
 
+  // Loads terrain for the current neighborhood and uploads it into Wasm memory.
   useEffect(() => {
     const engine = engineRef.current;
     const wasmModule = wasmModuleRef.current;

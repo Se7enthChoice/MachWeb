@@ -40,14 +40,17 @@ interface TerrainTile {
 
 const tileCache = new Map<string, Promise<TerrainTile>>();
 
+// Constrains latitude to the area represented by Web Mercator tiles.
 function clampLatitude(latitude: number): number {
   return Math.max(-MAX_MERCATOR_LATITUDE, Math.min(MAX_MERCATOR_LATITUDE, latitude));
 }
 
+// Wraps longitude into the standard [-180, 180) range.
 function normalizeLongitude(longitude: number): number {
   return ((longitude + 180) % 360 + 360) % 360 - 180;
 }
 
+// Converts geographic coordinates to a wrapped Web Mercator tile address.
 function getTileAddress(latitude: number, longitude: number): TileAddress {
   const tileCount = 2 ** TERRAIN_ZOOM;
   const latitudeRadians = (clampLatitude(latitude) * Math.PI) / 180;
@@ -62,6 +65,7 @@ function getTileAddress(latitude: number, longitude: number): TileAddress {
   };
 }
 
+// Converts simulator offsets in feet to geographic coordinates near the origin.
 export function getAircraftCoordinates(
   origin: TerrainOrigin,
   posXFeet: number,
@@ -79,14 +83,17 @@ export function getAircraftCoordinates(
   };
 }
 
+// Produces a zoom-qualified key shared by elevation and imagery tile requests.
 function tileKey(address: TileAddress): string {
   return `${TERRAIN_ZOOM}/${address.x}/${address.y}`;
 }
 
+// Builds the satellite imagery URL for a tile in the current terrain grid.
 export function getSatelliteTileUrl(tile: TerrainTileCoordinate): string {
   return `https://e.tiles.maps.eox.at/wmts/1.0.0/s2cloudless_3857/default/GoogleMapsCompatible/${TERRAIN_ZOOM}/${tile.y}/${tile.x}.jpg`;
 }
 
+// Identifies when the aircraft has crossed into a different terrain neighborhood.
 export function getTerrainNeighborhoodKey(
   origin: TerrainOrigin,
   posXFeet: number,
@@ -103,6 +110,7 @@ export function getTerrainNeighborhoodKey(
   return tileKey(address);
 }
 
+// Fetches and decodes one Terrarium PNG tile into meter elevation samples.
 async function decodeTerrariumTile(address: TileAddress): Promise<TerrainTile> {
   const url = `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${TERRAIN_ZOOM}/${address.x}/${address.y}.png`;
   const response = await fetch(url);
@@ -135,6 +143,7 @@ async function decodeTerrariumTile(address: TileAddress): Promise<TerrainTile> {
   }
 }
 
+// Loads a tile once, reuses in-flight requests, and evicts least-recently-used entries.
 function loadTile(address: TileAddress): Promise<TerrainTile> {
   const key = tileKey(address);
   const cached = tileCache.get(key);
@@ -157,17 +166,20 @@ function loadTile(address: TileAddress): Promise<TerrainTile> {
   return request;
 }
 
+// Converts a horizontal world-pixel coordinate to longitude.
 function longitudeAtPixel(pixelX: number): number {
   const worldPixels = TILE_SIZE * 2 ** TERRAIN_ZOOM;
   return (pixelX / worldPixels) * 360 - 180;
 }
 
+// Converts a vertical Web Mercator pixel coordinate to latitude.
 function latitudeAtPixel(pixelY: number): number {
   const worldPixels = TILE_SIZE * 2 ** TERRAIN_ZOOM;
   const mercatorY = Math.PI * (1 - (2 * pixelY) / worldPixels);
   return (Math.atan(Math.sinh(mercatorY)) * 180) / Math.PI;
 }
 
+// Maps longitude to local east/west simulator feet relative to the origin.
 function localXFeet(longitude: number, origin: TerrainOrigin): number {
   const longitudeDelta = normalizeLongitude(longitude - origin.longitude);
   return (
@@ -178,6 +190,7 @@ function localXFeet(longitude: number, origin: TerrainOrigin): number {
   );
 }
 
+// Maps latitude to local north/south simulator feet; positive Z points south.
 function localZFeet(latitude: number, origin: TerrainOrigin): number {
   return (
     -((latitude - origin.latitude) * Math.PI / 180) *
@@ -186,6 +199,7 @@ function localZFeet(latitude: number, origin: TerrainOrigin): number {
   );
 }
 
+// Converts geographic coordinates to the simulator's local horizontal axes.
 export function getLocalPosition(
   origin: TerrainOrigin,
   coordinates: TerrainOrigin,
@@ -196,6 +210,7 @@ export function getLocalPosition(
   };
 }
 
+// Loads a square tile neighborhood and assembles its elevation samples and grid metadata.
 export async function loadTerrainGrid(
   origin: TerrainOrigin,
   posXFeet: number,
