@@ -37,6 +37,8 @@ private:
     const Track* getTrack(int index) const;
 
 public:
+    // Clears targets, tracks, and scan phase when the radar is powered off.
+    void reset();
     // Replaces the target set on the next update without clearing existing tracks.
     void clearTargets();
     // Adds a finite world-space target; returns false when invalid or at capacity.

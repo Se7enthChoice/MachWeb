@@ -49,6 +49,7 @@ interface SimEngineInstance {
   getHeading(): number;
   getVerticalSpeed(): number;
   getCrashed(): boolean;
+  setRadarEnabled(enabled: boolean): void;
   clearRadarTargets(): void;
   addRadarTarget(id: number, posX: number, altitude: number, posZ: number): boolean;
   getRadarContactCount(): number;
@@ -128,6 +129,7 @@ export default function Home() {
   const [heading, setHeading] = useState<number>(0);
   const [verticalSpeed, setVerticalSpeed] = useState<number>(0);
   const [crashed, setCrashed] = useState(false);
+  const [radarEnabled, setRadarEnabled] = useState(true);
   const [radarContacts, setRadarContacts] = useState<RadarContact[]>([]);
   const [radarScanAzimuth, setRadarScanAzimuth] = useState(-60);
   const [radarScanBar, setRadarScanBar] = useState(1);
@@ -137,6 +139,7 @@ export default function Home() {
 
   // Mutable values shared with callbacks and animation loops without rerendering.
   const throttleRef = useRef(0.43);
+  const radarEnabledRef = useRef(radarEnabled);
   const engineRef = useRef<SimEngineInstance | null>(null);
   const wasmModuleRef = useRef<SimEngineModule | null>(null);
   const latestPositionRef = useRef({ posX, posZ });
@@ -152,6 +155,14 @@ export default function Home() {
   const radarTargetIdsRef = useRef(new Map<string, number>());
   const nextRadarTargetIdRef = useRef(1);
   const terrainNeighborhoodKey = getTerrainNeighborhoodKey(terrainOrigin, posX, posZ);
+
+  const handleRadarToggle = (): void => {
+    const nextEnabled = !radarEnabledRef.current;
+    radarEnabledRef.current = nextEnabled;
+    engineRef.current?.setRadarEnabled(nextEnabled);
+    setRadarEnabled(nextEnabled);
+    setRadarContacts([]);
+  };
 
   // Synchronizes connection state and host-facing joiner status.
   const refreshConnectedPeers = (): void => {
@@ -690,31 +701,33 @@ export default function Home() {
             engineInstance.setThrottle(throttleRef.current);
 
             // Refresh the radar target list from recent multiplayer reports.
-            const now = performance.now();
-            const radarTargets = remoteTelemetriesRef.current
-              .filter(
-                telemetry =>
-                  now -
-                    (remoteTelemetryReceivedAtRef.current.get(telemetry.playerId) ?? 0) <=
-                  2000,
-              )
-              .slice(0, MAX_RADAR_TARGETS);
-            engineInstance.clearRadarTargets();
-            for (const target of radarTargets) {
-              let targetId = radarTargetIdsRef.current.get(target.playerId);
-              if (targetId === undefined) {
-                targetId = nextRadarTargetIdRef.current;
-                nextRadarTargetIdRef.current += 1;
-                radarTargetIdsRef.current.set(target.playerId, targetId);
-              }
-              const targetPosition = getLocalPosition(terrainOrigin, target);
-              if (!engineInstance.addRadarTarget(
-                targetId,
-                targetPosition.posXFeet,
-                target.altitude,
-                targetPosition.posZFeet,
-              )) {
-                setStatus('Radar could not accept an aircraft target.');
+            if (radarEnabledRef.current) {
+              const now = performance.now();
+              const radarTargets = remoteTelemetriesRef.current
+                .filter(
+                  telemetry =>
+                    now -
+                      (remoteTelemetryReceivedAtRef.current.get(telemetry.playerId) ?? 0) <=
+                    2000,
+                )
+                .slice(0, MAX_RADAR_TARGETS);
+              engineInstance.clearRadarTargets();
+              for (const target of radarTargets) {
+                let targetId = radarTargetIdsRef.current.get(target.playerId);
+                if (targetId === undefined) {
+                  targetId = nextRadarTargetIdRef.current;
+                  nextRadarTargetIdRef.current += 1;
+                  radarTargetIdsRef.current.set(target.playerId, targetId);
+                }
+                const targetPosition = getLocalPosition(terrainOrigin, target);
+                if (!engineInstance.addRadarTarget(
+                  targetId,
+                  targetPosition.posXFeet,
+                  target.altitude,
+                  targetPosition.posZFeet,
+                )) {
+                  setStatus('Radar could not accept an aircraft target.');
+                }
               }
             }
 
@@ -763,21 +776,23 @@ export default function Home() {
             setCrashed(nextCrashed);
 
             // Read radar returns at 10 Hz instead of triggering a render every frame.
-            radarUiElapsed += clampedDt;
-            if (radarUiElapsed >= 0.1) {
-              radarUiElapsed %= 0.1;
-              const radarEngine = engineInstance;
-              const contactCount = radarEngine.getRadarContactCount();
-              const nextRadarContacts = Array.from({ length: contactCount }, (_, index) => ({
-                targetId: radarEngine.getRadarContactTargetId(index),
-                rangeNm: radarEngine.getRadarContactRangeNm(index),
-                azimuth: radarEngine.getRadarContactAzimuth(index),
-                elevation: radarEngine.getRadarContactElevation(index),
-                ageSeconds: radarEngine.getRadarContactAge(index),
-              }));
-              setRadarContacts(nextRadarContacts);
-              setRadarScanAzimuth(radarEngine.getRadarScanAzimuth());
-              setRadarScanBar(radarEngine.getRadarScanBar());
+            if (radarEnabledRef.current) {
+              radarUiElapsed += clampedDt;
+              if (radarUiElapsed >= 0.1) {
+                radarUiElapsed %= 0.1;
+                const radarEngine = engineInstance;
+                const contactCount = radarEngine.getRadarContactCount();
+                const nextRadarContacts = Array.from({ length: contactCount }, (_, index) => ({
+                  targetId: radarEngine.getRadarContactTargetId(index),
+                  rangeNm: radarEngine.getRadarContactRangeNm(index),
+                  azimuth: radarEngine.getRadarContactAzimuth(index),
+                  elevation: radarEngine.getRadarContactElevation(index),
+                  ageSeconds: radarEngine.getRadarContactAge(index),
+                }));
+                setRadarContacts(nextRadarContacts);
+                setRadarScanAzimuth(radarEngine.getRadarScanAzimuth());
+                setRadarScanBar(radarEngine.getRadarScanBar());
+              }
             }
 
             // Send local aircraft state to connected peers at 10 Hz.
@@ -845,6 +860,12 @@ export default function Home() {
       wasmModuleRef.current = null;
     };
   }, [multiplayerRole, simulationStarted, terrainOrigin]);
+
+  // Applies radar power changes to the active WebAssembly simulation instance.
+  useEffect(() => {
+    radarEnabledRef.current = radarEnabled;
+    engineRef.current?.setRadarEnabled(radarEnabled);
+  }, [flightReady, radarEnabled]);
 
   // Keeps radar targets aligned with the latest validated multiplayer telemetry.
   useEffect(() => {
@@ -986,6 +1007,7 @@ export default function Home() {
             heading={heading}
             airspeed={airspeed}
             crashed={crashed}
+            radarEnabled={radarEnabled}
             remoteTelemetries={Object.values(remoteTelemetryByPlayer)}
             radarContacts={radarContacts}
             radarScanAzimuth={radarScanAzimuth}
@@ -1031,6 +1053,32 @@ export default function Home() {
             <span className="text-2xl font-bold text-zinc-200">{verticalSpeed.toFixed(0)}</span>
             <span className="mt-1 block text-xs text-zinc-600">FT/MIN</span>
           </div>
+        </div>
+
+        <div className="mb-4 flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-widest text-zinc-300">Radar</p>
+            <p className="mt-1 text-xs text-zinc-500">
+              {radarEnabled ? 'Scanning and tracking enabled' : 'Radar system disabled'}
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={radarEnabled}
+            aria-label="Radar"
+            onClick={handleRadarToggle}
+            className={`relative h-7 w-12 rounded-full border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400 ${
+              radarEnabled ? 'border-emerald-500 bg-emerald-600' : 'border-zinc-600 bg-zinc-700'
+            }`}
+          >
+            <span
+              aria-hidden="true"
+              className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                radarEnabled ? 'translate-x-6' : 'translate-x-0'
+              }`}
+            />
+          </button>
         </div>
 
         <div className="bg-zinc-950/50 border border-zinc-800/80 rounded-lg p-4 text-xs text-zinc-400">

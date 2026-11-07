@@ -43,6 +43,12 @@ ScanPosition scanPositionAt(double time) {
 
 }
 
+void Radar::reset() {
+    clearTargets();
+    tracks = {};
+    radarTime = 0.0;
+}
+
 void Radar::clearTargets() {
     targetCount = 0;
 }

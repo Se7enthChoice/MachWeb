@@ -13,6 +13,7 @@ private:
     Terrain terrain;
     FlightModel aircraft;
     Radar radar;
+    bool radarEnabled = true;
 
 public:
     // Advances each subsystem using a positive timestep capped at 0.1 seconds.
@@ -20,15 +21,17 @@ public:
         if (!std::isfinite(dt) || dt <= 0.0f) return;
         dt = std::min(dt, 0.1f);
         aircraft.tick(dt, terrain);
-        radar.tick(
-            dt,
-            aircraft.getPosX(),
-            aircraft.getAltitude(),
-            aircraft.getPosZ(),
-            terrain,
-            aircraft.getHeading(),
-            aircraft.getPitch(),
-            aircraft.getRoll());
+        if (radarEnabled) {
+            radar.tick(
+                dt,
+                aircraft.getPosX(),
+                aircraft.getAltitude(),
+                aircraft.getPosZ(),
+                terrain,
+                aircraft.getHeading(),
+                aircraft.getPitch(),
+                aircraft.getRoll());
+        }
     }
 
     // Forwards normalized flight-control commands to the flight model.
@@ -36,8 +39,14 @@ public:
     void setRollInput(float value) { aircraft.setRollInput(value); }
     void setYawInput(float value) { aircraft.setYawInput(value); }
     void setThrottle(float value) { aircraft.setThrottle(value); }
+    void setRadarEnabled(bool enabled) {
+        if (radarEnabled == enabled) return;
+        radarEnabled = enabled;
+        if (!radarEnabled) radar.reset();
+    }
     void clearRadarTargets() { radar.clearTargets(); }
     bool addRadarTarget(unsigned int id, float posX, float altitude, float posZ) {
+        if (!radarEnabled) return false;
         return radar.addTarget(id, posX, altitude, posZ);
     }
 
@@ -100,6 +109,7 @@ EMSCRIPTEN_BINDINGS(sim_engine) {
         .function("setRollInput", &SimEngine::setRollInput)
         .function("setYawInput", &SimEngine::setYawInput)
         .function("setThrottle", &SimEngine::setThrottle)
+        .function("setRadarEnabled", &SimEngine::setRadarEnabled)
         .function("clearRadarTargets", &SimEngine::clearRadarTargets)
         .function("addRadarTarget", &SimEngine::addRadarTarget)
         .function("setTerrainData", &SimEngine::setTerrainData)
