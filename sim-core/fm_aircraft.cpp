@@ -5,37 +5,6 @@
 
 #include "utils.h"
 
-// Builds the aircraft's forward, up, and right unit vectors from degree angles.
-void FlightModel::getOrientationBasis(
-    float headingDegrees,
-    float pitchDegrees,
-    float rollDegrees,
-    Vector3& forward,
-    Vector3& up,
-    Vector3& right) {
-    const float pitch = pitchDegrees * DEG_to_RAD;
-    const float roll = rollDegrees * DEG_to_RAD;
-    const float heading = headingDegrees * DEG_to_RAD;
-    const float sinPitch = std::sin(pitch);
-    const float cosPitch = std::cos(pitch);
-    const float sinRoll = std::sin(roll);
-    const float cosRoll = std::cos(roll);
-    const float sinHeading = std::sin(heading);
-    const float cosHeading = std::cos(heading);
-
-    forward = {sinHeading * cosPitch, sinPitch, -cosHeading * cosPitch};
-    up = {
-        -sinHeading * sinPitch * cosRoll + cosHeading * sinRoll,
-        cosPitch * cosRoll,
-        cosHeading * sinPitch * cosRoll + sinHeading * sinRoll,
-    };
-    right = {
-        cosHeading * cosRoll + sinHeading * sinPitch * sinRoll,
-        -cosPitch * sinRoll,
-        sinHeading * cosRoll - cosHeading * sinPitch * sinRoll,
-    };
-}
-
 // Advances flight dynamics by dt seconds and resolves contact against the terrain.
 void FlightModel::tick(float dt, const Terrain& terrain) {
     crashTimeRemaining = std::max(0.0f, crashTimeRemaining - dt);
@@ -61,7 +30,7 @@ void FlightModel::tick(float dt, const Terrain& terrain) {
     Vector3 forward;
     Vector3 up;
     Vector3 right;
-    getOrientationBasis(heading, pitchAngle, rollAngle, forward, up, right);
+    get_orientation_basis(heading, pitchAngle, rollAngle, forward, up, right);
     const Vector3 velocity{velocityX, velocityY, velocityZ};
     const float angleOfAttack = std::atan2(-dot(velocity, up), dot(velocity, forward));
     const float angleOfAttackDegrees = angleOfAttack * RAD_to_DEG;

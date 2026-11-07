@@ -11,8 +11,8 @@ MachWeb/
 │   ├── env_terrain.h                 # Terrain subsystem interface and grid state
 │   ├── fm_aircraft.cpp               # Aircraft state updates, controls, and flight dynamics
 │   ├── fm_aircraft.h                 # Flight model interface and aircraft state
-│   ├── ws_systems.cpp                # Weapon-system update stub
-│   ├── ws_systems.h                  # Weapon-system interface
+│   ├── ws_radar.cpp                  # Scanning airborne radar and contact tracking
+│   ├── ws_radar.h                    # Radar subsystem interface
 │   ├── utils.h                       # Shared constants and vector/angle math helpers
 │   ├── CMakeLists.txt                # CMake target and Emscripten linker configuration
 │   └── build/                        # Generated CMake/Ninja output (created by the build)
@@ -26,7 +26,8 @@ MachWeb/
 │   │   ├── favicon.ico               # Application favicon
 │   │   └── components/
 │   │       ├── PreflightScreen.tsx   # Flight setup and multiplayer connection UI
-│   │       └── FlightViewport.tsx    # Three.js cockpit view, terrain, lighting, and remote aircraft
+│   │       ├── FlightViewport.tsx    # Three.js cockpit view, terrain, lighting, and remote aircraft
+│   │       └── RadarScope.tsx        # Heading-up radar scope overlay
 │   ├── public/wasm/
 │   │   ├── sim-core.js               # Generated Emscripten JavaScript loader
 │   │   └── sim-core.wasm             # Generated WebAssembly simulation binary
@@ -41,8 +42,8 @@ MachWeb/
 ```
 
 The C++ core is divided by subsystem prefix: `env_` for environmental data, `fm_` for flight
-model and controls, and `ws_` for weapon systems. `main.cpp` coordinates these modules and
-preserves the JavaScript-facing `SimEngine` API. The frontend loads the compiled core, supplies
+model and controls, and `ws_` for weapon systems such as the radar. `main.cpp` coordinates these
+modules and preserves the JavaScript-facing `SimEngine` API. The frontend loads the compiled core, supplies
 terrain and control inputs, and renders local and multiplayer flight state.
 
 ## Prerequisites
@@ -144,6 +145,10 @@ The preflight screen defaults to the browser's current local time; you can choos
 The simulation advances with the browser animation loop and bounds large frame deltas to keep the flight model stable after pauses or tab switches.
 Pitch, roll, and rudder controls have speed-sensitive response and aerodynamic damping. Pitch input applies an aerodynamic moment around the aircraft's rolled lateral axis rather than a fixed rotation rate, with pitch authority reduced at high angles of attack. Lift responds to the angle of attack between aircraft attitude and the flight path, so brief differences between nose attitude and climb or descent are possible during maneuvers. Bank produces sustained turns; rudder introduces a damped sideslip rather than directly steering the flight path. Vertical speed is limited to keep extreme climbs and dives recoverable.
 
+## Airborne Radar
+
+The radar scope searches a 120-degree azimuth sector, a 32-degree elevation volume, and out to 40 nautical miles, using four elevation bars and a 2.4-second scan cycle. A contact is acquired only while the simulated beam overlaps an aircraft in azimuth, elevation, and range; detections coast for 3.6 seconds between scans. In multiplayer, aircraft with fresh telemetry are supplied to the simulation radar and appear on the heading-up scope with range and relative angles.
+
 ## Terrain
 
 The viewport loads public AWS Open Data Terrain Tiles in Mapzen Terrarium format at zoom level 12, along with aligned Sentinel-2 EOxCloudless imagery for the same 12-by-12 tile neighborhood (four times the previous width). Set a start latitude and longitude on the preflight screen; the simulator maps its local `(0, 0)` position to that point. As the aircraft crosses tile boundaries, the browser loads a cached terrain neighborhood, decodes its PNG pixels into meter elevations, and updates the terrain mesh and satellite texture patches. The mesh samples every fourth elevation pixel to keep rendering costs bounded across the larger area, and distance fog fades the far terrain into the sky. Failed terrain requests are reported in the viewport; unavailable imagery falls back to elevation coloring.
@@ -158,6 +163,6 @@ The connection uses Google's public STUN service to discover network addresses. 
 
 ## Development Workflow
 
-Modifying Flight Dynamics (`sim-core/fm_aircraft.cpp`): Edit aircraft controls or flight-model behavior, then run `./build.ps1` from the root folder to recompile. Terrain behavior belongs in `sim-core/env_terrain.cpp`; `sim-core/main.cpp` is the subsystem facade and WebAssembly binding.
+Modifying Flight Dynamics (`sim-core/fm_aircraft.cpp`): Edit aircraft controls or flight-model behavior, then run `./build.ps1` from the root folder to recompile. Terrain behavior belongs in `sim-core/env_terrain.cpp`; radar behavior belongs in `sim-core/ws_radar.cpp`; `sim-core/main.cpp` is the subsystem facade and WebAssembly binding.
 
 Modifying UI/Dashboard (`web-app/app/page.tsx`): Next.js handles hot-reloading for TypeScript/React frontend code automatically. Terrain loading and WebRTC message helpers live in `terrain.ts` and `webrtc.ts`, while the preflight UI and 3D viewport are in `app/components/`.

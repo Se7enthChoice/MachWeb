@@ -45,6 +45,37 @@ struct Vector3
     float z;
 };
 
+// Builds forward, up, and right unit vectors from aircraft attitude angles.
+static void get_orientation_basis(
+    float headingDegrees,
+    float pitchDegrees,
+    float rollDegrees,
+    Vector3& forward,
+    Vector3& up,
+    Vector3& right) {
+    const float pitch = pitchDegrees * DEG_to_RAD;
+    const float roll = rollDegrees * DEG_to_RAD;
+    const float heading = headingDegrees * DEG_to_RAD;
+    const float sinPitch = std::sin(pitch);
+    const float cosPitch = std::cos(pitch);
+    const float sinRoll = std::sin(roll);
+    const float cosRoll = std::cos(roll);
+    const float sinHeading = std::sin(heading);
+    const float cosHeading = std::cos(heading);
+
+    forward = {sinHeading * cosPitch, sinPitch, -cosHeading * cosPitch};
+    up = {
+        -sinHeading * sinPitch * cosRoll + cosHeading * sinRoll,
+        cosPitch * cosRoll,
+        cosHeading * sinPitch * cosRoll + sinHeading * sinRoll,
+    };
+    right = {
+        cosHeading * cosRoll + sinHeading * sinPitch * sinRoll,
+        -cosPitch * sinRoll,
+        sinHeading * cosRoll - cosHeading * sinPitch * sinRoll,
+    };
+}
+
 // Computes the cross product of two 3D vectors a and b.
 static Vector3 cross(const Vector3& a, const Vector3& b) 
 {

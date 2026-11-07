@@ -5,14 +5,14 @@
 
 #include "env_terrain.h"
 #include "fm_aircraft.h"
-#include "ws_systems.h"
+#include "ws_radar.h"
 
 // Coordinates simulation subsystems and exposes the stable WebAssembly API.
 class SimEngine {
 private:
     Terrain terrain;
     FlightModel aircraft;
-    WeaponSystems weapons;
+    Radar radar;
 
 public:
     // Advances each subsystem using a positive timestep capped at 0.1 seconds.
@@ -20,7 +20,14 @@ public:
         if (!std::isfinite(dt) || dt <= 0.0f) return;
         dt = std::min(dt, 0.1f);
         aircraft.tick(dt, terrain);
-        weapons.tick(dt);
+        radar.tick(
+            dt,
+            aircraft.getPosX(),
+            aircraft.getAltitude(),
+            aircraft.getPosZ(),
+            aircraft.getHeading(),
+            aircraft.getPitch(),
+            aircraft.getRoll());
     }
 
     // Forwards normalized flight-control commands to the flight model.
@@ -28,6 +35,10 @@ public:
     void setRollInput(float value) { aircraft.setRollInput(value); }
     void setYawInput(float value) { aircraft.setYawInput(value); }
     void setThrottle(float value) { aircraft.setThrottle(value); }
+    void clearRadarTargets() { radar.clearTargets(); }
+    bool addRadarTarget(unsigned int id, float posX, float altitude, float posZ) {
+        return radar.addTarget(id, posX, altitude, posZ);
+    }
 
     // Replaces terrain data; returns false when the supplied grid is invalid.
     bool setTerrainData(
@@ -67,6 +78,16 @@ public:
     float getHeading() const { return aircraft.getHeading(); }
     float getVerticalSpeed() const { return aircraft.getVerticalSpeed(); }
     bool getCrashed() const { return aircraft.getCrashed(); }
+    int getRadarContactCount() const { return radar.getContactCount(); }
+    unsigned int getRadarContactTargetId(int index) const {
+        return radar.getContactTargetId(index);
+    }
+    float getRadarContactRangeNm(int index) const { return radar.getContactRangeNm(index); }
+    float getRadarContactAzimuth(int index) const { return radar.getContactAzimuth(index); }
+    float getRadarContactElevation(int index) const { return radar.getContactElevation(index); }
+    float getRadarContactAge(int index) const { return radar.getContactAge(index); }
+    float getRadarScanAzimuth() const { return radar.getScanAzimuth(); }
+    int getRadarScanBar() const { return radar.getScanBar(); }
 };
 
 // Binds the simulation facade methods used by the web application.
@@ -78,6 +99,8 @@ EMSCRIPTEN_BINDINGS(sim_engine) {
         .function("setRollInput", &SimEngine::setRollInput)
         .function("setYawInput", &SimEngine::setYawInput)
         .function("setThrottle", &SimEngine::setThrottle)
+        .function("clearRadarTargets", &SimEngine::clearRadarTargets)
+        .function("addRadarTarget", &SimEngine::addRadarTarget)
         .function("setTerrainData", &SimEngine::setTerrainData)
         .function("clearTerrainData", &SimEngine::clearTerrainData)
         .function("getPosX", &SimEngine::getPosX)
@@ -90,5 +113,13 @@ EMSCRIPTEN_BINDINGS(sim_engine) {
         .function("getRoll", &SimEngine::getRoll)
         .function("getHeading", &SimEngine::getHeading)
         .function("getVerticalSpeed", &SimEngine::getVerticalSpeed)
-        .function("getCrashed", &SimEngine::getCrashed);
+        .function("getCrashed", &SimEngine::getCrashed)
+        .function("getRadarContactCount", &SimEngine::getRadarContactCount)
+        .function("getRadarContactTargetId", &SimEngine::getRadarContactTargetId)
+        .function("getRadarContactRangeNm", &SimEngine::getRadarContactRangeNm)
+        .function("getRadarContactAzimuth", &SimEngine::getRadarContactAzimuth)
+        .function("getRadarContactElevation", &SimEngine::getRadarContactElevation)
+        .function("getRadarContactAge", &SimEngine::getRadarContactAge)
+        .function("getRadarScanAzimuth", &SimEngine::getRadarScanAzimuth)
+        .function("getRadarScanBar", &SimEngine::getRadarScanBar);
 }

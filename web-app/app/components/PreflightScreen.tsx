@@ -6,6 +6,7 @@ export interface HostPeerSession {
   id: string;
   offer: string;
   answer: string;
+  answerApplied: boolean;
   status: string;
 }
 
@@ -221,7 +222,7 @@ export default function PreflightScreen({
                         <button
                           type="button"
                           onClick={() => onApplyAnswer(session.id)}
-                          disabled={!session.answer.trim() || multiplayerBusy || !session.offer}
+                          disabled={!session.answer.trim() || multiplayerBusy || !session.offer || session.answerApplied}
                           className="rounded-lg border border-emerald-500/50 bg-emerald-500/10 px-4 py-2 text-xs font-bold tracking-wider text-emerald-300 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           CONNECT JOINER {index + 1}

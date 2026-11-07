@@ -28,14 +28,6 @@ private:
     float rollInput = 0.0f;
     float yawInput = 0.0f;
 
-    static void getOrientationBasis(
-        float headingDegrees,
-        float pitchDegrees,
-        float rollDegrees,
-        Vector3& forward,
-        Vector3& up,
-        Vector3& right);
-
 public:
     void tick(float dt, const Terrain& terrain);
 

@@ -4,9 +4,11 @@ import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import FlightViewport from './components/FlightViewport';
 import PreflightScreen from './components/PreflightScreen';
+import type { RadarContact } from './components/RadarScope';
 import type { HostPeerSession } from './components/PreflightScreen';
 import {
   getAircraftCoordinates,
+  getLocalPosition,
   getTerrainNeighborhoodKey,
   loadTerrainGrid,
 } from './terrain';
@@ -47,6 +49,16 @@ interface SimEngineInstance {
   getHeading(): number;
   getVerticalSpeed(): number;
   getCrashed(): boolean;
+  clearRadarTargets(): void;
+  addRadarTarget(id: number, posX: number, altitude: number, posZ: number): boolean;
+  getRadarContactCount(): number;
+  getRadarContactTargetId(index: number): number;
+  getRadarContactRangeNm(index: number): number;
+  getRadarContactAzimuth(index: number): number;
+  getRadarContactElevation(index: number): number;
+  getRadarContactAge(index: number): number;
+  getRadarScanAzimuth(): number;
+  getRadarScanBar(): number;
   delete(): void;
 }
 
@@ -65,6 +77,8 @@ type SimEngineModuleFactory = (options: {
 const DEFAULT_LATITUDE = 51.5000;
 const DEFAULT_LONGITUDE = -2.5833;
 
+const MAX_RADAR_TARGETS = 64;
+
 // Formats elapsed simulation minutes as a zero-padded 24-hour clock.
 function formatTimeOfDay(totalMinutes: number): string {
   const wholeMinutes = Math.floor(totalMinutes) % (24 * 60);
@@ -75,6 +89,7 @@ function formatTimeOfDay(totalMinutes: number): string {
 
 // Owns preflight state, the Wasm simulation loop, and multiplayer coordination.
 export default function Home() {
+  // Preflight selections and the terrain currently loaded into the simulation.
   const [latitudeInput, setLatitudeInput] = useState(String(DEFAULT_LATITUDE));
   const [longitudeInput, setLongitudeInput] = useState(String(DEFAULT_LONGITUDE));
   const [initialTimeInput, setInitialTimeInput] = useState('');
@@ -88,6 +103,8 @@ export default function Home() {
   const [terrainGrid, setTerrainGrid] = useState<TerrainGrid | null>(null);
   const [terrainStatus, setTerrainStatus] = useState('waiting for flight dynamics');
   const [setupError, setSetupError] = useState('');
+
+  // WebRTC signaling state and the latest telemetry received from each player.
   const [multiplayerRole, setMultiplayerRole] = useState<'solo' | 'host' | 'join'>('solo');
   const [multiplayerStatus, setMultiplayerStatus] = useState('Solo flight');
   const [multiplayerBusy, setMultiplayerBusy] = useState(false);
@@ -95,7 +112,11 @@ export default function Home() {
   const [localDescription, setLocalDescription] = useState('');
   const [remoteDescription, setRemoteDescription] = useState('');
   const [hostPeerSessions, setHostPeerSessions] = useState<HostPeerSession[]>([]);
-  const [remoteTelemetryByPlayer, setRemoteTelemetryByPlayer] = useState<Record<string, FlightTelemetry>>({});
+  const [remoteTelemetryByPlayer, setRemoteTelemetryByPlayer] = useState<
+    Record<string, FlightTelemetry>
+  >({});
+
+  // Live aircraft instruments and radar display state.
   const [simulationStarted, setSimulationStarted] = useState(false);
   const [flightReady, setFlightReady] = useState(false);
   const [altitude, setAltitude] = useState<number>(5000);
@@ -105,12 +126,16 @@ export default function Home() {
   const [pitch, setPitch] = useState<number>(0);
   const [roll, setRoll] = useState<number>(0);
   const [heading, setHeading] = useState<number>(0);
-  const [vSpeed, setVSpeed] = useState<number>(0);
+  const [verticalSpeed, setVerticalSpeed] = useState<number>(0);
   const [crashed, setCrashed] = useState(false);
+  const [radarContacts, setRadarContacts] = useState<RadarContact[]>([]);
+  const [radarScanAzimuth, setRadarScanAzimuth] = useState(-60);
+  const [radarScanBar, setRadarScanBar] = useState(1);
   const [posX, setPosX] = useState<number>(0);
   const [posZ, setPosZ] = useState<number>(0);
   const [status, setStatus] = useState<string>('Initializing flight dynamics...');
 
+  // Mutable values shared with callbacks and animation loops without rerendering.
   const throttleRef = useRef(0.43);
   const engineRef = useRef<SimEngineInstance | null>(null);
   const wasmModuleRef = useRef<SimEngineModule | null>(null);
@@ -122,10 +147,14 @@ export default function Home() {
   const hostTimeSequenceRef = useRef(0);
   const playerIdRef = useRef('');
   const telemetrySequenceRef = useRef(0);
+  const remoteTelemetriesRef = useRef<FlightTelemetry[]>([]);
+  const remoteTelemetryReceivedAtRef = useRef(new Map<string, number>());
+  const radarTargetIdsRef = useRef(new Map<string, number>());
+  const nextRadarTargetIdRef = useRef(1);
   const terrainNeighborhoodKey = getTerrainNeighborhoodKey(terrainOrigin, posX, posZ);
 
   // Synchronizes connection state and host-facing joiner status.
-  const refreshConnectedPeers = () => {
+  const refreshConnectedPeers = (): void => {
     const connectedCount = Array.from(dataChannelsRef.current.values())
       .filter(channel => channel.readyState === 'open').length;
     setMultiplayerConnected(connectedCount > 0);
@@ -139,7 +168,7 @@ export default function Home() {
   };
 
   // Sends the host's current time with a sequence number for stale-message filtering.
-  const sendHostTime = (channel: RTCDataChannel, minutes: number) => {
+  const sendHostTime = (channel: RTCDataChannel, minutes: number): void => {
     if (channel.readyState !== 'open') return;
     const sequence = hostTimeSequenceRef.current;
     hostTimeSequenceRef.current += 1;
@@ -152,13 +181,17 @@ export default function Home() {
   };
 
   // Closes all peer resources and clears multiplayer state.
-  const closePeerConnections = () => {
+  const closePeerConnections = (): void => {
     dataChannelsRef.current.forEach(channel => channel.close());
     peerConnectionsRef.current.forEach(connection => connection.close());
     dataChannelsRef.current.clear();
     peerConnectionsRef.current.clear();
     peerPlayersRef.current.clear();
+    remoteTelemetryReceivedAtRef.current.clear();
+    radarTargetIdsRef.current.clear();
+    nextRadarTargetIdRef.current = 1;
     setRemoteTelemetryByPlayer({});
+    setRadarContacts([]);
     setHostPeerSessions([]);
     setMultiplayerConnected(false);
   };
@@ -168,22 +201,28 @@ export default function Home() {
     connection: RTCPeerConnection,
     sessionId: string,
     role: 'host' | 'join',
-  ) => {
+  ): void => {
     connection.onconnectionstatechange = () => {
       if (peerConnectionsRef.current.get(sessionId) !== connection) return;
       if (connection.connectionState === 'connected') {
-        setHostPeerSessions(sessions => sessions.map(session =>
-          session.id === sessionId ? { ...session, status: 'connected' } : session,
-        ));
+        setHostPeerSessions(sessions =>
+          sessions.map(session =>
+            session.id === sessionId ? { ...session, status: 'connected' } : session,
+          ),
+        );
       } else if (connection.connectionState === 'failed') {
-        setHostPeerSessions(sessions => sessions.map(session =>
-          session.id === sessionId ? { ...session, status: 'connection failed' } : session,
-        ));
+        setHostPeerSessions(sessions =>
+          sessions.map(session =>
+            session.id === sessionId ? { ...session, status: 'connection failed' } : session,
+          ),
+        );
         if (role === 'join') setMultiplayerStatus('Connection failed. This network may require a TURN relay.');
       } else if (connection.connectionState === 'disconnected') {
-        setHostPeerSessions(sessions => sessions.map(session =>
-          session.id === sessionId ? { ...session, status: 'disconnected' } : session,
-        ));
+        setHostPeerSessions(sessions =>
+          sessions.map(session =>
+            session.id === sessionId ? { ...session, status: 'disconnected' } : session,
+          ),
+        );
       }
     };
   };
@@ -193,7 +232,7 @@ export default function Home() {
     channel: RTCDataChannel,
     sessionId: string,
     role: 'host' | 'join',
-  ) => {
+  ): void => {
     const lastReceivedSequences = new Map<string, number>();
     let lastReceivedTimeSequence = -1;
     let receivedHostTelemetry = false;
@@ -201,9 +240,11 @@ export default function Home() {
     peerPlayersRef.current.set(sessionId, new Set());
     channel.onopen = () => {
       if (dataChannelsRef.current.get(sessionId) !== channel) return;
-      setHostPeerSessions(sessions => sessions.map(session =>
-        session.id === sessionId ? { ...session, status: 'connected' } : session,
-      ));
+      setHostPeerSessions(sessions =>
+        sessions.map(session =>
+          session.id === sessionId ? { ...session, status: 'connected' } : session,
+        ),
+      );
       refreshConnectedPeers();
       if (role === 'join') {
         setMultiplayerStatus('Connected to host.');
@@ -222,18 +263,25 @@ export default function Home() {
       peerPlayersRef.current.delete(sessionId);
       setRemoteTelemetryByPlayer(current => {
         const next = { ...current };
-        playerIds.forEach(playerId => delete next[playerId]);
+        playerIds.forEach(playerId => {
+          delete next[playerId];
+          remoteTelemetryReceivedAtRef.current.delete(playerId);
+        });
         return next;
       });
-      setHostPeerSessions(sessions => sessions.map(session =>
-        session.id === sessionId ? { ...session, status: 'disconnected' } : session,
-      ));
+      setHostPeerSessions(sessions =>
+        sessions.map(session =>
+          session.id === sessionId ? { ...session, status: 'disconnected' } : session,
+        ),
+      );
       refreshConnectedPeers();
     };
     channel.onerror = () => {
-      setHostPeerSessions(sessions => sessions.map(session =>
-        session.id === sessionId ? { ...session, status: 'data channel error' } : session,
-      ));
+      setHostPeerSessions(sessions =>
+        sessions.map(session =>
+          session.id === sessionId ? { ...session, status: 'data channel error' } : session,
+        ),
+      );
     };
     channel.onmessage = event => {
       if (dataChannelsRef.current.get(sessionId) !== channel) return;
@@ -243,7 +291,11 @@ export default function Home() {
       }
       const hostTime = parseFlightTimeMessage(event.data);
       if (hostTime) {
-        if (role === 'join' && !receivedHostTelemetry && hostTime.sequence > lastReceivedTimeSequence) {
+        if (
+          role === 'join' &&
+          !receivedHostTelemetry &&
+          hostTime.sequence > lastReceivedTimeSequence
+        ) {
           lastReceivedTimeSequence = hostTime.sequence;
           simulationTimeRef.current = hostTime.minutes;
           setFlightStartTimeMinutes(hostTime.minutes);
@@ -258,9 +310,12 @@ export default function Home() {
         setMultiplayerStatus('Received invalid telemetry from a peer.');
         return;
       }
-      if (telemetry.sequence <= (lastReceivedSequences.get(telemetry.playerId) ?? -1)) return;
+      if (telemetry.sequence <= (lastReceivedSequences.get(telemetry.playerId) ?? -1)) {
+        return;
+      }
       lastReceivedSequences.set(telemetry.playerId, telemetry.sequence);
       peerPlayersRef.current.get(sessionId)?.add(telemetry.playerId);
+      remoteTelemetryReceivedAtRef.current.set(telemetry.playerId, performance.now());
       setRemoteTelemetryByPlayer(current => ({
         ...current,
         [telemetry.playerId]: telemetry,
@@ -287,7 +342,7 @@ export default function Home() {
   };
 
   // Updates the selected time and immediately syncs valid host changes to joiners.
-  const handleInitialTimeChange = (value: string) => {
+  const handleInitialTimeChange = (value: string): void => {
     setInitialTimeInput(value);
     if (multiplayerRole !== 'host' || !/^\d{2}:\d{2}$/.test(value)) return;
     const [hours, minutes] = value.split(':').map(Number);
@@ -296,26 +351,33 @@ export default function Home() {
   };
 
   // Resets signaling state when switching between solo, host, and join modes.
-  const handleMultiplayerRoleChange = (role: 'solo' | 'host' | 'join') => {
+  const handleMultiplayerRoleChange = (role: 'solo' | 'host' | 'join'): void => {
     closePeerConnections();
     setMultiplayerRole(role);
     setLocalDescription('');
     setRemoteDescription('');
-    setMultiplayerStatus(role === 'solo' ? 'Solo flight' : `Ready to ${role === 'host' ? 'host' : 'join'} a flight.`);
+    const roleLabel = role === 'host' ? 'host' : 'join';
+    setMultiplayerStatus(
+      role === 'solo' ? 'Solo flight' : `Ready to ${roleLabel} a flight.`,
+    );
   };
 
   // Creates a host offer and waits for ICE gathering before exposing it for sharing.
-  const handleCreateOffer = async () => {
+  const handleCreateOffer = async (): Promise<void> => {
     if (multiplayerOperationRef.current) return;
     multiplayerOperationRef.current = true;
     setMultiplayerBusy(true);
     const sessionId = crypto.randomUUID();
-    setHostPeerSessions(sessions => [...sessions, {
-      id: sessionId,
-      offer: '',
-      answer: '',
-      status: 'creating offer',
-    }]);
+    setHostPeerSessions(sessions => [
+      ...sessions,
+      {
+        id: sessionId,
+        offer: '',
+        answer: '',
+        answerApplied: false,
+        status: 'creating offer',
+      },
+    ]);
 
     try {
       const connection = new RTCPeerConnection({
@@ -323,23 +385,33 @@ export default function Home() {
       });
       peerConnectionsRef.current.set(sessionId, connection);
       configurePeerConnection(connection, sessionId, 'host');
-      configureDataChannel(connection.createDataChannel('flight-telemetry', { ordered: false }), sessionId, 'host');
+      configureDataChannel(
+        connection.createDataChannel('flight-telemetry', { ordered: false }),
+        sessionId,
+        'host',
+      );
       await connection.setLocalDescription(await connection.createOffer());
       await waitForIceGatheringComplete(connection);
-      if (!connection.localDescription) throw new Error('The peer connection did not produce a local offer.');
+      if (!connection.localDescription) {
+        throw new Error('The peer connection did not produce a local offer.');
+      }
       const offer = encodeSessionDescription(connection.localDescription);
-      setHostPeerSessions(sessions => sessions.map(session =>
-        session.id === sessionId ? { ...session, offer, status: 'offer ready' } : session,
-      ));
+      setHostPeerSessions(sessions =>
+        sessions.map(session =>
+          session.id === sessionId ? { ...session, offer, status: 'offer ready' } : session,
+        ),
+      );
       setMultiplayerStatus('Offer ready. Share it with one joiner and apply their answer here.');
     } catch (error) {
       dataChannelsRef.current.get(sessionId)?.close();
       peerConnectionsRef.current.get(sessionId)?.close();
       dataChannelsRef.current.delete(sessionId);
       peerConnectionsRef.current.delete(sessionId);
-      setHostPeerSessions(sessions => sessions.map(session =>
-        session.id === sessionId ? { ...session, status: 'offer failed' } : session,
-      ));
+      setHostPeerSessions(sessions =>
+        sessions.map(session =>
+          session.id === sessionId ? { ...session, status: 'offer failed' } : session,
+        ),
+      );
       const message = error instanceof Error ? error.message : String(error);
       setMultiplayerStatus(`Could not create offer: ${message}`);
     } finally {
@@ -349,7 +421,7 @@ export default function Home() {
   };
 
   // Applies a host offer and creates a shareable joiner answer.
-  const handleCreateAnswer = async () => {
+  const handleCreateAnswer = async (): Promise<void> => {
     if (multiplayerOperationRef.current) return;
     multiplayerOperationRef.current = true;
     setMultiplayerBusy(true);
@@ -363,11 +435,14 @@ export default function Home() {
       });
       peerConnectionsRef.current.set('host', connection);
       configurePeerConnection(connection, 'host', 'join');
-      connection.ondatachannel = event => configureDataChannel(event.channel, 'host', 'join');
+      connection.ondatachannel = event =>
+        configureDataChannel(event.channel, 'host', 'join');
       await connection.setRemoteDescription(decodeSessionDescription(remoteDescription, 'offer'));
       await connection.setLocalDescription(await connection.createAnswer());
       await waitForIceGatheringComplete(connection);
-      if (!connection.localDescription) throw new Error('The peer connection did not produce a local answer.');
+      if (!connection.localDescription) {
+        throw new Error('The peer connection did not produce a local answer.');
+      }
       setLocalDescription(encodeSessionDescription(connection.localDescription));
       setMultiplayerStatus('Answer ready. Share it with the host to complete the connection.');
     } catch (error) {
@@ -381,7 +456,7 @@ export default function Home() {
   };
 
   // Applies a joiner's answer to the matching host peer connection.
-  const handleApplyAnswer = async (sessionId: string) => {
+  const handleApplyAnswer = async (sessionId: string): Promise<void> => {
     if (multiplayerOperationRef.current) return;
     const session = hostPeerSessions.find(candidate => candidate.id === sessionId);
     const connection = peerConnectionsRef.current.get(sessionId);
@@ -389,19 +464,47 @@ export default function Home() {
       setMultiplayerStatus('Create a fresh offer before applying this answer.');
       return;
     }
+    if (session.answerApplied || connection.remoteDescription?.type === 'answer') {
+      setHostPeerSessions(sessions =>
+        sessions.map(candidate =>
+          candidate.id === sessionId
+            ? { ...candidate, answerApplied: true, status: 'answer applied' }
+            : candidate,
+        ),
+      );
+      setMultiplayerStatus('This answer has already been applied. Create a fresh offer to connect another joiner.');
+      return;
+    }
+    if (connection.signalingState !== 'have-local-offer') {
+      setMultiplayerStatus(
+        `Cannot apply answer while the peer connection is ${connection.signalingState}. Create a fresh offer.`,
+      );
+      return;
+    }
 
     multiplayerOperationRef.current = true;
     setMultiplayerBusy(true);
-    setHostPeerSessions(sessions => sessions.map(candidate =>
-      candidate.id === sessionId ? { ...candidate, status: 'connecting' } : candidate,
-    ));
+    setHostPeerSessions(sessions =>
+      sessions.map(candidate =>
+        candidate.id === sessionId ? { ...candidate, status: 'connecting' } : candidate,
+      ),
+    );
     try {
       await connection.setRemoteDescription(decodeSessionDescription(session.answer, 'answer'));
+      setHostPeerSessions(sessions =>
+        sessions.map(candidate =>
+          candidate.id === sessionId
+            ? { ...candidate, answerApplied: true, status: 'answer applied' }
+            : candidate,
+        ),
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setHostPeerSessions(sessions => sessions.map(candidate =>
-        candidate.id === sessionId ? { ...candidate, status: 'answer rejected' } : candidate,
-      ));
+      setHostPeerSessions(sessions =>
+        sessions.map(candidate =>
+          candidate.id === sessionId ? { ...candidate, status: 'answer rejected' } : candidate,
+        ),
+      );
       setMultiplayerStatus(`Could not apply answer: ${message}`);
     } finally {
       multiplayerOperationRef.current = false;
@@ -410,14 +513,16 @@ export default function Home() {
   };
 
   // Stores the answer text associated with a specific host offer.
-  const handleHostAnswerChange = (sessionId: string, answer: string) => {
-    setHostPeerSessions(sessions => sessions.map(session =>
-      session.id === sessionId ? { ...session, answer } : session,
-    ));
+  const handleHostAnswerChange = (sessionId: string, answer: string): void => {
+    setHostPeerSessions(sessions =>
+      sessions.map(session =>
+        session.id === sessionId ? { ...session, answer } : session,
+      ),
+    );
   };
 
   // Validates preflight inputs and initializes state for a new flight.
-  const handleStartFlight = (event: FormEvent<HTMLFormElement>) => {
+  const handleStartFlight = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
     if (multiplayerRole !== 'solo' && !multiplayerConnected) {
       setSetupError('Complete the peer connection before starting a multiplayer flight.');
@@ -446,9 +551,10 @@ export default function Home() {
       return;
     }
 
-    const startTimeMinutes = multiplayerRole === 'join' && multiplayerConnected
-      ? simulationTimeRef.current
-      : timeParts[0] * 60 + timeParts[1];
+    const startTimeMinutes =
+      multiplayerRole === 'join' && multiplayerConnected
+        ? simulationTimeRef.current
+        : timeParts[0] * 60 + timeParts[1];
     setSetupError('');
     setTerrainGrid(null);
     setTerrainOrigin({ latitude, longitude });
@@ -461,7 +567,7 @@ export default function Home() {
   };
 
   // Closes active sessions and restores the preflight defaults.
-  const handleEndFlight = () => {
+  const handleEndFlight = (): void => {
     closePeerConnections();
     setMultiplayerRole('solo');
     setMultiplayerStatus('Solo flight');
@@ -481,9 +587,11 @@ export default function Home() {
     setPitch(0);
     setRoll(0);
     setHeading(0);
-    setVSpeed(0);
+    setVerticalSpeed(0);
     setCrashed(false);
   };
+
+  // Simulation lifecycle and synchronization effects.
 
   // Closes outstanding peer resources when the page unmounts.
   useEffect(() => () => {
@@ -532,8 +640,10 @@ export default function Home() {
     async function initSim() {
       try {
         // The generated Emscripten module is served from public/wasm at runtime.
-        // @ts-expect-error This public asset is not part of the TypeScript module graph.
-        const moduleFactory = (await import(/* webpackIgnore: true */ '/wasm/sim-core.js')).default as SimEngineModuleFactory;
+        const moduleFactory = (
+          // @ts-expect-error This public asset is not part of the TypeScript module graph.
+          await import(/* webpackIgnore: true */ '/wasm/sim-core.js')
+        ).default as SimEngineModuleFactory;
         const wasmModule = await moduleFactory({
           locateFile: (path: string) => `/wasm/${path}`,
         });
@@ -547,6 +657,7 @@ export default function Home() {
 
         let lastTime = performance.now();
         let telemetrySendElapsed = 0;
+        let radarUiElapsed = 0;
 
         const loop = (currentTime: number) => {
           if (disposed) return;
@@ -578,6 +689,35 @@ export default function Home() {
             engineInstance.setYawInput(yawInput);
             engineInstance.setThrottle(throttleRef.current);
 
+            // Refresh the radar target list from recent multiplayer reports.
+            const now = performance.now();
+            const radarTargets = remoteTelemetriesRef.current
+              .filter(
+                telemetry =>
+                  now -
+                    (remoteTelemetryReceivedAtRef.current.get(telemetry.playerId) ?? 0) <=
+                  2000,
+              )
+              .slice(0, MAX_RADAR_TARGETS);
+            engineInstance.clearRadarTargets();
+            for (const target of radarTargets) {
+              let targetId = radarTargetIdsRef.current.get(target.playerId);
+              if (targetId === undefined) {
+                targetId = nextRadarTargetIdRef.current;
+                nextRadarTargetIdRef.current += 1;
+                radarTargetIdsRef.current.set(target.playerId, targetId);
+              }
+              const targetPosition = getLocalPosition(terrainOrigin, target);
+              if (!engineInstance.addRadarTarget(
+                targetId,
+                targetPosition.posXFeet,
+                target.altitude,
+                targetPosition.posZFeet,
+              )) {
+                setStatus('Radar could not accept an aircraft target.');
+              }
+            }
+
             engineInstance.tick(clampedDt);
 
             const telemetry = [
@@ -597,8 +737,18 @@ export default function Home() {
               return;
             }
 
-            const [nextPosX, nextAltitude, nextPosZ, nextGroundElevation,
-              nextAirspeed, nextThrottle, nextPitch, nextRoll, nextHeading, nextVSpeed] = telemetry;
+            const [
+              nextPosX,
+              nextAltitude,
+              nextPosZ,
+              nextGroundElevation,
+              nextAirspeed,
+              nextThrottle,
+              nextPitch,
+              nextRoll,
+              nextHeading,
+              nextVerticalSpeed,
+            ] = telemetry;
             setPosX(nextPosX);
             setAltitude(nextAltitude);
             setPosZ(nextPosZ);
@@ -608,10 +758,29 @@ export default function Home() {
             setPitch(nextPitch);
             setRoll(nextRoll);
             setHeading(nextHeading);
-            setVSpeed(nextVSpeed);
+            setVerticalSpeed(nextVerticalSpeed);
             const nextCrashed = engineInstance.getCrashed();
             setCrashed(nextCrashed);
 
+            // Read radar returns at 10 Hz instead of triggering a render every frame.
+            radarUiElapsed += clampedDt;
+            if (radarUiElapsed >= 0.1) {
+              radarUiElapsed %= 0.1;
+              const radarEngine = engineInstance;
+              const contactCount = radarEngine.getRadarContactCount();
+              const nextRadarContacts = Array.from({ length: contactCount }, (_, index) => ({
+                targetId: radarEngine.getRadarContactTargetId(index),
+                rangeNm: radarEngine.getRadarContactRangeNm(index),
+                azimuth: radarEngine.getRadarContactAzimuth(index),
+                elevation: radarEngine.getRadarContactElevation(index),
+                ageSeconds: radarEngine.getRadarContactAge(index),
+              }));
+              setRadarContacts(nextRadarContacts);
+              setRadarScanAzimuth(radarEngine.getRadarScanAzimuth());
+              setRadarScanBar(radarEngine.getRadarScanBar());
+            }
+
+            // Send local aircraft state to connected peers at 10 Hz.
             telemetrySendElapsed += clampedDt;
             const openChannels = Array.from(dataChannelsRef.current.values())
               .filter(channel => channel.readyState === 'open');
@@ -634,7 +803,7 @@ export default function Home() {
                 heading: nextHeading,
                 airspeed: nextAirspeed,
                 throttle: nextThrottle,
-                verticalSpeed: nextVSpeed,
+                verticalSpeed: nextVerticalSpeed,
                 crashed: nextCrashed,
                 ...aircraftCoordinates,
                 sequence: telemetrySequenceRef.current,
@@ -657,8 +826,8 @@ export default function Home() {
         };
 
         animationFrameId = requestAnimationFrame(loop);
-      } catch (err) {
-        console.error('Failed to load Wasm module:', err);
+      } catch (error) {
+        console.error('Failed to load Wasm module:', error);
         if (!disposed) setStatus('Error loading Wasm core');
       }
     }
@@ -676,6 +845,11 @@ export default function Home() {
       wasmModuleRef.current = null;
     };
   }, [multiplayerRole, simulationStarted, terrainOrigin]);
+
+  // Keeps radar targets aligned with the latest validated multiplayer telemetry.
+  useEffect(() => {
+    remoteTelemetriesRef.current = Object.values(remoteTelemetryByPlayer);
+  }, [remoteTelemetryByPlayer]);
 
   // Advances the local clock unless a connected host controls joiner time.
   useEffect(() => {
@@ -750,6 +924,7 @@ export default function Home() {
     };
   }, [flightReady, terrainOrigin, terrainNeighborhoodKey]);
 
+  // Render the preflight form until a flight is requested.
   if (!simulationStarted) {
     return (
       <PreflightScreen
@@ -779,16 +954,13 @@ export default function Home() {
     );
   }
 
+  // Render the active cockpit, instruments, and flight controls.
   return (
     <main className="flex min-h-screen flex-col items-stretch justify-start bg-zinc-950 p-3 font-mono text-zinc-100 sm:p-5">
       <div className="mx-auto w-full max-w-[1600px] rounded-xl border border-zinc-800 bg-zinc-900 p-3 shadow-2xl sm:p-5">
-
-        {/* Header */}
         <div className="mb-4 flex items-center justify-between border-b border-zinc-800 pb-3">
           <div>
-            <h1 className="text-xl font-bold tracking-wider text-emerald-400">
-              MACHWEB
-            </h1>
+            <h1 className="text-xl font-bold tracking-wider text-emerald-400">MACHWEB</h1>
             {status && <p className="mt-1 text-xs text-zinc-400">{status}</p>}
             {multiplayerRole !== 'solo' && (
               <p className="mt-1 text-xs text-emerald-300">{multiplayerStatus}</p>
@@ -804,7 +976,6 @@ export default function Home() {
           </div>
         </div>
 
-        {/* 3D Viewport */}
         <div className="mb-4">
           <FlightViewport
             posX={posX}
@@ -816,6 +987,9 @@ export default function Home() {
             airspeed={airspeed}
             crashed={crashed}
             remoteTelemetries={Object.values(remoteTelemetryByPlayer)}
+            radarContacts={radarContacts}
+            radarScanAzimuth={radarScanAzimuth}
+            radarScanBar={radarScanBar}
             terrainOrigin={terrainOrigin}
             terrainGrid={terrainGrid}
             terrainStatus={terrainStatus}
@@ -823,43 +997,57 @@ export default function Home() {
           />
         </div>
 
-        {/* Instruments */}
         <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
           <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 text-center">
-            <span className="text-xs text-zinc-500 uppercase tracking-widest block mb-1">Ground</span>
+            <span className="mb-1 block text-xs uppercase tracking-widest text-zinc-500">
+              Ground
+            </span>
             <span className="text-2xl font-bold text-zinc-100">{groundElevation.toFixed(0)}</span>
-            <span className="text-xs text-zinc-600 block mt-1">FEET MSL</span>
+            <span className="mt-1 block text-xs text-zinc-600">FEET MSL</span>
           </div>
 
           <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 text-center">
-            <span className="text-xs text-zinc-500 uppercase tracking-widest block mb-1">Attitude</span>
+            <span className="mb-1 block text-xs uppercase tracking-widest text-zinc-500">
+              Attitude
+            </span>
             <div className="text-sm font-bold text-zinc-200 mt-1">
               P: {pitch.toFixed(0)}°<br />
               R: {roll.toFixed(0)}°
             </div>
-            <span className="text-xs text-zinc-600 block mt-1">PITCH / ROLL</span>
+            <span className="mt-1 block text-xs text-zinc-600">PITCH / ROLL</span>
           </div>
 
           <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 text-center">
-            <span className="text-xs text-zinc-500 uppercase tracking-widest block mb-1">Throttle Setting</span>
+            <span className="mb-1 block text-xs uppercase tracking-widest text-zinc-500">
+              Throttle Setting
+            </span>
             <span className="text-2xl font-bold text-amber-400">{throttle.toFixed(0)}%</span>
           </div>
 
           <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 text-center">
-            <span className="text-xs text-zinc-500 uppercase tracking-widest block mb-1">Vertical Speed</span>
-            <span className="text-2xl font-bold text-zinc-200">{vSpeed.toFixed(0)}</span>
-            <span className="text-xs text-zinc-600 block mt-1">FT/MIN</span>
+            <span className="mb-1 block text-xs uppercase tracking-widest text-zinc-500">
+              Vertical Speed
+            </span>
+            <span className="text-2xl font-bold text-zinc-200">{verticalSpeed.toFixed(0)}</span>
+            <span className="mt-1 block text-xs text-zinc-600">FT/MIN</span>
           </div>
         </div>
 
-        {/* Controls Legend */}
         <div className="bg-zinc-950/50 border border-zinc-800/80 rounded-lg p-4 text-xs text-zinc-400">
           <p className="font-bold text-zinc-300 mb-2">PILOT FLIGHT CONTROLS:</p>
           <div className="grid grid-cols-2 gap-2">
-            <div><strong className="text-emerald-400">W / S</strong>: Pitch up / down</div>
-            <div><strong className="text-emerald-400">A / D</strong>: Bank for turns</div>
-            <div><strong className="text-emerald-400">Q / E</strong>: Rudder yaw / sideslip</div>
-            <div><strong className="text-emerald-400">SHIFT / CTRL</strong>: Throttle up / down</div>
+            <div>
+              <strong className="text-emerald-400">W / S</strong>: Pitch up / down
+            </div>
+            <div>
+              <strong className="text-emerald-400">A / D</strong>: Bank for turns
+            </div>
+            <div>
+              <strong className="text-emerald-400">Q / E</strong>: Rudder yaw / sideslip
+            </div>
+            <div>
+              <strong className="text-emerald-400">SHIFT / CTRL</strong>: Throttle up / down
+            </div>
           </div>
         </div>
       </div>

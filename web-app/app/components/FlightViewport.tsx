@@ -5,6 +5,8 @@ import * as THREE from 'three';
 import { getAircraftCoordinates, getLocalPosition, getSatelliteTileUrl } from '../terrain';
 import type { TerrainGrid, TerrainOrigin } from '../terrain';
 import type { FlightTelemetry } from '../webrtc';
+import RadarScope from './RadarScope';
+import type { RadarContact } from './RadarScope';
 
 interface FlightViewportProps {
   posX: number;
@@ -16,6 +18,9 @@ interface FlightViewportProps {
   airspeed: number;
   crashed: boolean;
   remoteTelemetries: FlightTelemetry[];
+  radarContacts: RadarContact[];
+  radarScanAzimuth: number;
+  radarScanBar: number;
   terrainOrigin: TerrainOrigin;
   terrainGrid: TerrainGrid | null;
   terrainStatus: string;
@@ -251,6 +256,9 @@ export default function FlightViewport({
   airspeed,
   crashed,
   remoteTelemetries,
+  radarContacts,
+  radarScanAzimuth,
+  radarScanBar,
   terrainOrigin,
   terrainGrid,
   terrainStatus,
@@ -832,6 +840,11 @@ export default function FlightViewport({
   return (
     <div className="relative h-[58vh] min-h-80 max-h-224 w-full overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 shadow-inner sm:h-[70vh]">
       <div ref={mountRef} className="w-full h-full" />
+      <RadarScope
+        contacts={radarContacts}
+        scanAzimuth={radarScanAzimuth}
+        scanBar={radarScanBar}
+      />
       <div className="pointer-events-none absolute left-1/2 top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2">
         <span className="absolute left-1/2 top-0 h-3 w-px -translate-x-1/2 bg-emerald-300/80" />
         <span className="absolute left-0 top-1/2 h-px w-3 -translate-y-1/2 bg-emerald-300/80" />
