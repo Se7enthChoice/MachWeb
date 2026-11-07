@@ -14,6 +14,8 @@ interface FlightViewportProps {
   altitude: number;
   pitch: number;
   roll: number;
+  throttle: number;
+  verticalSpeed: number;
   heading: number;
   airspeed: number;
   crashed: boolean;
@@ -25,6 +27,8 @@ interface FlightViewportProps {
   terrainOrigin: TerrainOrigin;
   terrainGrid: TerrainGrid | null;
   terrainStatus: string;
+  status: string;
+  multiplayerStatus: string;
   simulationTimeMinutes: number;
 }
 
@@ -253,6 +257,8 @@ export default function FlightViewport({
   altitude,
   pitch,
   roll,
+  throttle,
+  verticalSpeed,
   heading,
   airspeed,
   crashed,
@@ -264,6 +270,8 @@ export default function FlightViewport({
   terrainOrigin,
   terrainGrid,
   terrainStatus,
+  status,
+  multiplayerStatus,
   simulationTimeMinutes,
 }: FlightViewportProps) {
   const mountRef = useRef<HTMLDivElement>(null);
@@ -840,7 +848,7 @@ export default function FlightViewport({
   ].filter(Boolean);
 
   return (
-    <div className="relative h-[58vh] min-h-80 max-h-224 w-full overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 shadow-inner sm:h-[70vh]">
+    <div className="relative h-[100dvh] w-full overflow-hidden border-b border-zinc-800 bg-zinc-950 shadow-inner">
       <div ref={mountRef} className="w-full h-full" />
       {radarEnabled && (
         <RadarScope
@@ -853,14 +861,29 @@ export default function FlightViewport({
         <span className="absolute left-1/2 top-0 h-3 w-px -translate-x-1/2 bg-emerald-300/80" />
         <span className="absolute left-0 top-1/2 h-px w-3 -translate-y-1/2 bg-emerald-300/80" />
       </div>
-      <div className="pointer-events-none absolute left-3 top-3 rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 font-mono text-xs text-emerald-300 backdrop-blur">
-        MACHWEB
+      <div className="pointer-events-none absolute left-3 top-3 flex max-w-[75%] flex-col items-start gap-1 font-mono text-xs backdrop-blur">
+        <span className="rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 text-emerald-300">
+          MACHWEB
+        </span>
+        {status && (
+          <span className="max-w-full break-words rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 text-zinc-300">
+            {status}
+          </span>
+        )}
+        {multiplayerStatus && (
+          <span className="max-w-full break-words rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 text-emerald-300">
+            {multiplayerStatus}
+          </span>
+        )}
+        {resourceErrors.map(error => (
+          <span
+            key={error}
+            className="max-w-full break-all rounded border border-red-500/60 bg-red-950/85 px-2 py-1 text-red-300"
+          >
+            {error}
+          </span>
+        ))}
       </div>
-      {resourceErrors.length > 0 && (
-        <div className="pointer-events-none absolute left-3 top-10 max-w-[70%] break-all rounded border border-red-500/60 bg-red-950/85 px-2 py-1 font-mono text-xs text-red-300 backdrop-blur">
-          {resourceErrors.join(' · ')}
-        </div>
-      )}
       <div className="pointer-events-none absolute right-3 top-3 rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 font-mono text-xs text-zinc-200 backdrop-blur">
         LOCAL TIME {Math.floor(simulationTimeMinutes / 60).toString().padStart(2, '0')}:
         {Math.floor(simulationTimeMinutes % 60).toString().padStart(2, '0')}
@@ -870,8 +893,12 @@ export default function FlightViewport({
           CRASHED
         </div>
       )}
-      <div className="pointer-events-none absolute bottom-3 right-3 rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 font-mono text-xs text-zinc-200 backdrop-blur">
-        HDG {heading.toFixed(0)}° · ALT {altitude.toFixed(0)} FT · {airspeed.toFixed(0)} KT
+      <div className="pointer-events-none absolute bottom-3 right-3 rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 text-right font-mono text-[10px] leading-4 text-zinc-200 backdrop-blur sm:text-xs">
+        <div>HDG {heading.toFixed(0)}° · ALT {altitude.toFixed(0)} FT · {airspeed.toFixed(0)} KT</div>
+        <div>PITCH {pitch.toFixed(0)}° · ROLL {roll.toFixed(0)}°</div>
+        <div>
+          THR {throttle.toFixed(0)}% · VS {verticalSpeed.toFixed(0)} FT/MIN
+        </div>
       </div>
     </div>
   );

@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "MachWeb Flight Simulator",
+  title: "MachWeb",
   description: "A first-person 6DOF flight simulator powered by WebAssembly.",
 };
 

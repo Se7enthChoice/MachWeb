@@ -78,10 +78,10 @@ export default function PreflightScreen({
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_50%_0%,rgba(16,185,129,0.12),transparent_55%)]" />
       <section className="relative w-full max-w-3xl overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/95 shadow-2xl">
         <div className="border-b border-zinc-800 px-6 py-7 sm:px-10 sm:py-9">
-          <p className="mb-3 text-xs font-bold tracking-[0.3em] text-emerald-400">MACHWEB // FLIGHT SIMULATOR</p>
+          <p className="mb-3 text-xs font-bold tracking-[0.3em] text-emerald-400">MACHWEB</p>
           <h1 className="text-3xl font-bold tracking-wide text-zinc-100 sm:text-5xl">PREFLIGHT</h1>
           <p className="mt-3 max-w-xl text-sm leading-6 text-zinc-400">
-            Set up your flight before entering the cockpit. Your start location is locked for the duration of each flight.
+            Set up your flight before entering the cockpit.
           </p>
         </div>
 
@@ -124,7 +124,7 @@ export default function PreflightScreen({
               </label>
             </div>
             <p className="mt-3 text-xs text-zinc-500">
-              Initial values: Filton Airfield, Bristol, UK. Enter coordinates to select another area.
+              Enter coordinates to select starting location. Your start location is locked for the duration of each flight.
             </p>
           </div>
 

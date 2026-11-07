@@ -41,7 +41,6 @@ interface SimEngineInstance {
   getPosX(): number;
   getAltitude(): number;
   getPosZ(): number;
-  getGroundElevation(): number;
   getAirspeed(): number;
   getThrottle(): number;
   getPitch(): number;
@@ -121,7 +120,6 @@ export default function Home() {
   const [simulationStarted, setSimulationStarted] = useState(false);
   const [flightReady, setFlightReady] = useState(false);
   const [altitude, setAltitude] = useState<number>(5000);
-  const [groundElevation, setGroundElevation] = useState<number>(0);
   const [airspeed, setAirspeed] = useState<number>(300);
   const [throttle, setThrottle] = useState<number>(43);
   const [pitch, setPitch] = useState<number>(0);
@@ -592,7 +590,6 @@ export default function Home() {
     setPosX(0);
     setPosZ(0);
     setAltitude(5000);
-    setGroundElevation(0);
     setAirspeed(300);
     setThrottle(43);
     setPitch(0);
@@ -737,7 +734,6 @@ export default function Home() {
               engineInstance.getPosX(),
               engineInstance.getAltitude(),
               engineInstance.getPosZ(),
-              engineInstance.getGroundElevation(),
               engineInstance.getAirspeed(),
               engineInstance.getThrottle(),
               engineInstance.getPitch(),
@@ -754,7 +750,6 @@ export default function Home() {
               nextPosX,
               nextAltitude,
               nextPosZ,
-              nextGroundElevation,
               nextAirspeed,
               nextThrottle,
               nextPitch,
@@ -765,7 +760,6 @@ export default function Home() {
             setPosX(nextPosX);
             setAltitude(nextAltitude);
             setPosZ(nextPosZ);
-            setGroundElevation(nextGroundElevation);
             setAirspeed(nextAirspeed);
             setThrottle(nextThrottle);
             setPitch(nextPitch);
@@ -977,33 +971,17 @@ export default function Home() {
 
   // Render the active cockpit, instruments, and flight controls.
   return (
-    <main className="flex min-h-screen flex-col items-stretch justify-start bg-zinc-950 p-3 font-mono text-zinc-100 sm:p-5">
-      <div className="mx-auto w-full max-w-[1600px] rounded-xl border border-zinc-800 bg-zinc-900 p-3 shadow-2xl sm:p-5">
-        <div className="mb-4 flex items-center justify-between border-b border-zinc-800 pb-3">
-          <div>
-            <h1 className="text-xl font-bold tracking-wider text-emerald-400">MACHWEB</h1>
-            {status && <p className="mt-1 text-xs text-zinc-400">{status}</p>}
-            {multiplayerRole !== 'solo' && (
-              <p className="mt-1 text-xs text-emerald-300">{multiplayerStatus}</p>
-            )}
-          </div>
-          <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-4">
-            <button
-              onClick={handleEndFlight}
-              className="rounded border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs font-bold text-zinc-300 transition-colors hover:border-red-500/50 hover:bg-red-950/40 hover:text-red-300"
-            >
-              END FLIGHT
-            </button>
-          </div>
-        </div>
-
-        <div className="mb-4">
+    <main className="flex min-h-screen flex-col items-stretch justify-start bg-zinc-950 font-mono text-zinc-100">
+      <div className="w-full">
+        <div>
           <FlightViewport
             posX={posX}
             posZ={posZ}
             altitude={altitude}
             pitch={pitch}
             roll={roll}
+            throttle={throttle}
+            verticalSpeed={verticalSpeed}
             heading={heading}
             airspeed={airspeed}
             crashed={crashed}
@@ -1015,44 +993,10 @@ export default function Home() {
             terrainOrigin={terrainOrigin}
             terrainGrid={terrainGrid}
             terrainStatus={terrainStatus}
+            status={status}
+            multiplayerStatus={multiplayerRole !== 'solo' ? multiplayerStatus : ''}
             simulationTimeMinutes={simulationTimeMinutes}
           />
-        </div>
-
-        <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
-          <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 text-center">
-            <span className="mb-1 block text-xs uppercase tracking-widest text-zinc-500">
-              Ground
-            </span>
-            <span className="text-2xl font-bold text-zinc-100">{groundElevation.toFixed(0)}</span>
-            <span className="mt-1 block text-xs text-zinc-600">FEET MSL</span>
-          </div>
-
-          <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 text-center">
-            <span className="mb-1 block text-xs uppercase tracking-widest text-zinc-500">
-              Attitude
-            </span>
-            <div className="text-sm font-bold text-zinc-200 mt-1">
-              P: {pitch.toFixed(0)}°<br />
-              R: {roll.toFixed(0)}°
-            </div>
-            <span className="mt-1 block text-xs text-zinc-600">PITCH / ROLL</span>
-          </div>
-
-          <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 text-center">
-            <span className="mb-1 block text-xs uppercase tracking-widest text-zinc-500">
-              Throttle Setting
-            </span>
-            <span className="text-2xl font-bold text-amber-400">{throttle.toFixed(0)}%</span>
-          </div>
-
-          <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 text-center">
-            <span className="mb-1 block text-xs uppercase tracking-widest text-zinc-500">
-              Vertical Speed
-            </span>
-            <span className="text-2xl font-bold text-zinc-200">{verticalSpeed.toFixed(0)}</span>
-            <span className="mt-1 block text-xs text-zinc-600">FT/MIN</span>
-          </div>
         </div>
 
         <div className="mb-4 flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950 p-4">
@@ -1096,6 +1040,14 @@ export default function Home() {
             <div>
               <strong className="text-emerald-400">SHIFT / CTRL</strong>: Throttle up / down
             </div>
+          </div>
+          <div className="mt-4 flex justify-end">
+            <button
+              onClick={handleEndFlight}
+              className="rounded border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs font-bold text-zinc-300 transition-colors hover:border-red-500/50 hover:bg-red-950/40 hover:text-red-300"
+            >
+              END FLIGHT
+            </button>
           </div>
         </div>
       </div>
