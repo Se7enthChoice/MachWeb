@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "env_terrain.h"
 #include "utils.h"
 
 namespace {
@@ -63,6 +64,7 @@ void Radar::tick(
     float posX,
     float altitude,
     float posZ,
+    const Terrain& terrain,
     float heading,
     float pitch,
     float roll) {
@@ -109,6 +111,11 @@ void Radar::tick(
                 std::abs(elevation) > elevationBars.back() + elevationBeamWidth / 2.0f ||
                 std::abs(azimuth - beam.azimuth) > azimuthBeamWidth / 2.0f ||
                 std::abs(elevation - beam.elevation) > elevationBeamWidth / 2.0f) {
+                continue;
+            }
+            if (!terrain.hasLineOfSight(
+                    posX, altitude, posZ,
+                    target.posX, target.altitude, target.posZ)) {
                 continue;
             }
 

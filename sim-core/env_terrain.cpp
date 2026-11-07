@@ -79,3 +79,39 @@ float Terrain::sampleHeightMeters(float xFeet, float zFeet) const {
 float Terrain::getElevationFeet(float xFeet, float zFeet) const {
     return sampleHeightMeters(xFeet, zFeet) * M_to_F;
 }
+
+// Checks intermediate points along the ray against the interpolated terrain surface.
+bool Terrain::hasLineOfSight(
+    float startXFeet,
+    float startAltitudeFeet,
+    float startZFeet,
+    float endXFeet,
+    float endAltitudeFeet,
+    float endZFeet) const {
+    if (heightsMeters.empty()) return true;
+    if (!std::isfinite(startXFeet) || !std::isfinite(startAltitudeFeet) ||
+        !std::isfinite(startZFeet) || !std::isfinite(endXFeet) ||
+        !std::isfinite(endAltitudeFeet) || !std::isfinite(endZFeet)) {
+        return false;
+    }
+
+    const float deltaX = endXFeet - startXFeet;
+    const float deltaZ = endZFeet - startZFeet;
+    const float horizontalDistance = std::sqrt(deltaX * deltaX + deltaZ * deltaZ);
+    const float sampleSpacing = std::min(spacingXFeet, spacingZFeet) * 0.5f;
+    const int sampleCount = std::max(
+        1,
+        static_cast<int>(std::ceil(horizontalDistance / sampleSpacing)));
+
+    for (int sample = 1; sample < sampleCount; ++sample) {
+        const float fraction = static_cast<float>(sample) / sampleCount;
+        const float xFeet = startXFeet + deltaX * fraction;
+        const float zFeet = startZFeet + deltaZ * fraction;
+        const float rayAltitudeFeet =
+            startAltitudeFeet + (endAltitudeFeet - startAltitudeFeet) * fraction;
+        if (sampleHeightMeters(xFeet, zFeet) * M_to_F >= rayAltitudeFeet) {
+            return false;
+        }
+    }
+    return true;
+}

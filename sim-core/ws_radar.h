@@ -3,6 +3,8 @@
 #include <array>
 #include <cstdint>
 
+class Terrain;
+
 class Radar {
 private:
     // Targets are refreshed by the caller; tracks persist across beam revisits.
@@ -40,7 +42,7 @@ public:
     // Adds a finite world-space target; returns false when invalid or at capacity.
     bool addTarget(std::uint32_t id, float posX, float altitude, float posZ);
     // Advances the scan and updates returns using the aircraft's current pose.
-    void tick(float dt, float posX, float altitude, float posZ,
+    void tick(float dt, float posX, float altitude, float posZ, const Terrain& terrain,
         float heading, float pitch, float roll);
 
     // Exposes active tracks in compact index order; invalid indices return safe defaults.

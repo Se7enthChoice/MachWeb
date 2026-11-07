@@ -25,4 +25,12 @@ public:
         float originZFeet);
     void clear();
     float getElevationFeet(float xFeet, float zFeet) const;
+    // Returns false if terrain intersects the straight path between two world positions.
+    bool hasLineOfSight(
+        float startXFeet,
+        float startAltitudeFeet,
+        float startZFeet,
+        float endXFeet,
+        float endAltitudeFeet,
+        float endZFeet) const;
 };

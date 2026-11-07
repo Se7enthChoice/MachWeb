@@ -25,6 +25,7 @@ public:
             aircraft.getPosX(),
             aircraft.getAltitude(),
             aircraft.getPosZ(),
+            terrain,
             aircraft.getHeading(),
             aircraft.getPitch(),
             aircraft.getRoll());

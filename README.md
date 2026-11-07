@@ -147,7 +147,7 @@ Pitch, roll, and rudder controls have speed-sensitive response and aerodynamic d
 
 ## Airborne Radar
 
-The radar scope searches a 120-degree azimuth sector, a 32-degree elevation volume, and out to 40 nautical miles, using four elevation bars and a 2.4-second scan cycle. A contact is acquired only while the simulated beam overlaps an aircraft in azimuth, elevation, and range; detections coast for 3.6 seconds between scans. In multiplayer, aircraft with fresh telemetry are supplied to the simulation radar and appear on the heading-up scope with range and relative angles.
+The radar scope searches a 120-degree azimuth sector, a 32-degree elevation volume, and out to 40 nautical miles, using four elevation bars and a 2.4-second scan cycle. A contact is acquired only while the simulated beam overlaps an aircraft in azimuth, elevation, and range, and terrain along the line of sight does not block the return; detections coast for 3.6 seconds between scans. In multiplayer, aircraft with fresh telemetry are supplied to the simulation radar and appear on the heading-up scope with range and relative angles.
 
 ## Terrain
 
