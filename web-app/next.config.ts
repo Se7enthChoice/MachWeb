@@ -13,6 +13,10 @@ const nextConfig: NextConfig = {
     },
   },
   allowedDevOrigins: ['192.168.1.89'],
+  output: 'export', 
+  images: {
+    unoptimized: true, // Disable image optimization for static export
+  },
 };
 
 export default nextConfig;
