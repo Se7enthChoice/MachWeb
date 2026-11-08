@@ -1,6 +1,6 @@
 import type { NextConfig } from "next";
 
-const basePath = "/MachWeb";
+const basePath = process.env.NODE_ENV === "production" ? "/MachWeb" : "";
 
 const nextConfig: NextConfig = {
   /* config options here */
