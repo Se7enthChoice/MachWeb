@@ -5,6 +5,7 @@ const nextConfig: NextConfig = {
   //cacheComponents: true,
   //partialPrefetching: true,
   output: 'export',
+  basePath: '/MachWeb',
   turbopack: {
     rules: {
       "*.css": {
