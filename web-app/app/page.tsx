@@ -5,6 +5,7 @@ import type { FormEvent } from 'react';
 import FlightViewport from './components/FlightViewport';
 import PreflightScreen from './components/PreflightScreen';
 import type { RadarContact } from './components/RadarScope';
+import type { RadarWarningContact } from './components/RadarWarningReceiver';
 import type { HostPeerSession } from './components/PreflightScreen';
 import {
   getAircraftCoordinates,
@@ -87,6 +88,63 @@ function formatTimeOfDay(totalMinutes: number): string {
   return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
 }
 
+function getRadarWarningContacts(
+  localPlayerId: string,
+  remoteTelemetries: FlightTelemetry[],
+  receivedAt: Map<string, number>,
+  now: number,
+  terrainOrigin: TerrainOrigin,
+  posX: number,
+  posZ: number,
+  altitude: number,
+  heading: number,
+  pitch: number,
+  roll: number,
+): RadarWarningContact[] {
+  if (!localPlayerId) return [];
+
+  const headingRadians = (heading * Math.PI) / 180;
+  const pitchRadians = (pitch * Math.PI) / 180;
+  const rollRadians = (roll * Math.PI) / 180;
+  const sinHeading = Math.sin(headingRadians);
+  const cosHeading = Math.cos(headingRadians);
+  const sinPitch = Math.sin(pitchRadians);
+  const cosPitch = Math.cos(pitchRadians);
+  const sinRoll = Math.sin(rollRadians);
+  const cosRoll = Math.cos(rollRadians);
+  const forward = [sinHeading * cosPitch, sinPitch, -cosHeading * cosPitch];
+  const right = [
+    cosHeading * cosRoll + sinHeading * sinPitch * sinRoll,
+    -cosPitch * sinRoll,
+    sinHeading * cosRoll - cosHeading * sinPitch * sinRoll,
+  ];
+
+  return remoteTelemetries
+    .filter(
+      telemetry =>
+        telemetry.radarDetectedPlayerIds?.includes(localPlayerId) &&
+        now - (receivedAt.get(telemetry.playerId) ?? 0) <= 2000,
+    )
+    .map(telemetry => {
+      const emitter = getLocalPosition(terrainOrigin, telemetry);
+      const relative = [
+        emitter.posXFeet - posX,
+        telemetry.altitude - altitude,
+        emitter.posZFeet - posZ,
+      ];
+      const forwardDistance = relative.reduce(
+        (sum, value, index) => sum + value * forward[index],
+        0,
+      );
+      const rightDistance = relative.reduce(
+        (sum, value, index) => sum + value * right[index],
+        0,
+      );
+      const azimuth = Math.atan2(rightDistance, forwardDistance) * (180 / Math.PI);
+      return { emitterId: telemetry.playerId, azimuth };
+    });
+}
+
 // Owns preflight state, the Wasm simulation loop, and multiplayer coordination.
 export default function Home() {
   // Preflight selections and the terrain currently loaded into the simulation.
@@ -131,6 +189,7 @@ export default function Home() {
   const [radarContacts, setRadarContacts] = useState<RadarContact[]>([]);
   const [radarScanAzimuth, setRadarScanAzimuth] = useState(-60);
   const [radarScanBar, setRadarScanBar] = useState(1);
+  const [radarWarnings, setRadarWarnings] = useState<RadarWarningContact[]>([]);
   const [posX, setPosX] = useState<number>(0);
   const [posZ, setPosZ] = useState<number>(0);
   const [status, setStatus] = useState<string>('Initializing flight dynamics...');
@@ -151,6 +210,7 @@ export default function Home() {
   const remoteTelemetriesRef = useRef<FlightTelemetry[]>([]);
   const remoteTelemetryReceivedAtRef = useRef(new Map<string, number>());
   const radarTargetIdsRef = useRef(new Map<string, number>());
+  const radarTargetPlayerIdsRef = useRef(new Map<number, string>());
   const nextRadarTargetIdRef = useRef(1);
   const terrainNeighborhoodKey = getTerrainNeighborhoodKey(terrainOrigin, posX, posZ);
 
@@ -198,9 +258,11 @@ export default function Home() {
     peerPlayersRef.current.clear();
     remoteTelemetryReceivedAtRef.current.clear();
     radarTargetIdsRef.current.clear();
+    radarTargetPlayerIdsRef.current.clear();
     nextRadarTargetIdRef.current = 1;
     setRemoteTelemetryByPlayer({});
     setRadarContacts([]);
+    setRadarWarnings([]);
     setHostPeerSessions([]);
     setMultiplayerConnected(false);
   };
@@ -666,6 +728,7 @@ export default function Home() {
         let lastTime = performance.now();
         let telemetrySendElapsed = 0;
         let radarUiElapsed = 0;
+        let rwrUiElapsed = 0;
 
         const loop = (currentTime: number) => {
           if (disposed) return;
@@ -715,6 +778,7 @@ export default function Home() {
                   targetId = nextRadarTargetIdRef.current;
                   nextRadarTargetIdRef.current += 1;
                   radarTargetIdsRef.current.set(target.playerId, targetId);
+                  radarTargetPlayerIdsRef.current.set(targetId, target.playerId);
                 }
                 const targetPosition = getLocalPosition(terrainOrigin, target);
                 if (!engineInstance.addRadarTarget(
@@ -789,6 +853,26 @@ export default function Home() {
               }
             }
 
+            rwrUiElapsed += clampedDt;
+            if (rwrUiElapsed >= 0.1) {
+              rwrUiElapsed %= 0.1;
+              setRadarWarnings(
+                getRadarWarningContacts(
+                  playerIdRef.current,
+                  remoteTelemetriesRef.current,
+                  remoteTelemetryReceivedAtRef.current,
+                  performance.now(),
+                  terrainOrigin,
+                  nextPosX,
+                  nextPosZ,
+                  nextAltitude,
+                  nextHeading,
+                  nextPitch,
+                  nextRoll,
+                ),
+              );
+            }
+
             // Send local aircraft state to connected peers at 10 Hz.
             telemetrySendElapsed += clampedDt;
             const openChannels = Array.from(dataChannelsRef.current.values())
@@ -801,6 +885,16 @@ export default function Home() {
                 nextPosZ,
               );
               if (!playerIdRef.current) playerIdRef.current = crypto.randomUUID();
+              const telemetryEngine = engineInstance;
+              const radarDetectedPlayerIds = telemetryEngine
+                ? Array.from(
+                    { length: telemetryEngine.getRadarContactCount() },
+                    (_, index) =>
+                      radarTargetPlayerIdsRef.current.get(
+                        telemetryEngine.getRadarContactTargetId(index),
+                      ),
+                  ).filter((playerId): playerId is string => playerId !== undefined)
+                : [];
               const telemetry: FlightTelemetry = {
                 playerId: playerIdRef.current,
                 isHost: multiplayerRole === 'host',
@@ -817,6 +911,7 @@ export default function Home() {
                 ...aircraftCoordinates,
                 sequence: telemetrySequenceRef.current,
                 simulationTimeMinutes: simulationTimeRef.current,
+                radarDetectedPlayerIds,
               };
               telemetrySequenceRef.current += 1;
               const message = JSON.stringify({ type: 'telemetry', telemetry });
@@ -988,6 +1083,7 @@ export default function Home() {
             radarEnabled={radarEnabled}
             remoteTelemetries={Object.values(remoteTelemetryByPlayer)}
             radarContacts={radarContacts}
+            radarWarnings={radarWarnings}
             radarScanAzimuth={radarScanAzimuth}
             radarScanBar={radarScanBar}
             terrainOrigin={terrainOrigin}

@@ -1,3 +1,4 @@
+// Flight telemetry data associated with a peer connection.
 export interface FlightTelemetry {
   playerId: string;
   isHost: boolean;
@@ -15,6 +16,7 @@ export interface FlightTelemetry {
   longitude: number;
   sequence: number;
   simulationTimeMinutes: number;
+  radarDetectedPlayerIds?: string[];
 }
 
 // Encodes a WebRTC description as a UTF-8-safe Base64 string for manual exchange.
@@ -122,7 +124,14 @@ function isFlightTelemetry(value: unknown): value is FlightTelemetry {
     typeof value.sequence === 'number' &&
     Number.isSafeInteger(value.sequence) &&
     value.sequence >= 0 &&
-    typeof value.crashed === 'boolean'
+    typeof value.crashed === 'boolean' &&
+    (value.radarDetectedPlayerIds === undefined ||
+      (Array.isArray(value.radarDetectedPlayerIds) &&
+        value.radarDetectedPlayerIds.length <= 64 &&
+        value.radarDetectedPlayerIds.every(
+          playerId =>
+            typeof playerId === 'string' && playerId.length > 0 && playerId.length <= 64,
+        )))
   );
 }
 

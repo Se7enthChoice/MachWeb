@@ -7,6 +7,8 @@ import type { TerrainGrid, TerrainOrigin } from '../terrain';
 import type { FlightTelemetry } from '../webrtc';
 import RadarScope from './RadarScope';
 import type { RadarContact } from './RadarScope';
+import RadarWarningReceiver from './RadarWarningReceiver';
+import type { RadarWarningContact } from './RadarWarningReceiver';
 
 interface FlightViewportProps {
   posX: number;
@@ -22,6 +24,7 @@ interface FlightViewportProps {
   radarEnabled: boolean;
   remoteTelemetries: FlightTelemetry[];
   radarContacts: RadarContact[];
+  radarWarnings: RadarWarningContact[];
   radarScanAzimuth: number;
   radarScanBar: number;
   terrainOrigin: TerrainOrigin;
@@ -265,6 +268,7 @@ export default function FlightViewport({
   radarEnabled,
   remoteTelemetries,
   radarContacts,
+  radarWarnings,
   radarScanAzimuth,
   radarScanBar,
   terrainOrigin,
@@ -850,12 +854,17 @@ export default function FlightViewport({
   return (
     <div className="relative h-[100dvh] w-full overflow-hidden border-b border-zinc-800 bg-zinc-950 shadow-inner">
       <div ref={mountRef} className="w-full h-full" />
-      {radarEnabled && (
-        <RadarScope
-          contacts={radarContacts}
-          scanAzimuth={radarScanAzimuth}
-          scanBar={radarScanBar}
-        />
+      {(radarEnabled || radarWarnings.length > 0) && (
+        <div className="pointer-events-none absolute bottom-2 left-2 flex items-end gap-2 sm:bottom-3 sm:left-3 sm:gap-3">
+          {radarEnabled && (
+            <RadarScope
+              contacts={radarContacts}
+              scanAzimuth={radarScanAzimuth}
+              scanBar={radarScanBar}
+            />
+          )}
+          {radarWarnings.length > 0 && <RadarWarningReceiver contacts={radarWarnings} />}
+        </div>
       )}
       <div className="pointer-events-none absolute left-1/2 top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2">
         <span className="absolute left-1/2 top-0 h-3 w-px -translate-x-1/2 bg-emerald-300/80" />

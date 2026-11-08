@@ -77,7 +77,7 @@ export default function RadarScope({ contacts, scanAzimuth, scanBar }: RadarScop
   return (
     <section
       aria-label="Aircraft radar scope"
-      className="pointer-events-none absolute bottom-3 left-3 w-44 rounded-lg border border-emerald-500/40 bg-zinc-950/90 p-2 font-mono text-[10px] text-emerald-200 shadow-lg backdrop-blur sm:w-48"
+      className="pointer-events-none relative w-40 rounded-lg border border-emerald-500/40 bg-zinc-950/90 p-2 font-mono text-[10px] text-emerald-200 shadow-lg backdrop-blur sm:w-48"
     >
       <svg viewBox="0 0 200 200" className="block w-full" role="img" aria-label="Heading-up radar">
         <circle cx={center} cy={center} r={radius} fill="#03120f" stroke="#28664f" strokeWidth="1.5" />

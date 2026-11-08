@@ -149,6 +149,8 @@ Pitch, roll, and rudder controls have speed-sensitive response and aerodynamic d
 
 The radar scope searches a 120-degree azimuth sector, a 32-degree elevation volume, and out to 40 nautical miles, using four elevation bars and a 2.4-second scan cycle. A contact is acquired only while the simulated beam overlaps an aircraft in azimuth, elevation, and range, and terrain along the line of sight does not block the return; detections coast for 3.6 seconds between scans. In multiplayer, aircraft with fresh telemetry are supplied to the simulation radar and appear on the heading-up scope with range and relative angles.
 
+The bearing-only radar warning receiver appears alongside the radar scope only when a multiplayer peer's radar has detected the local aircraft. Detected player IDs travel with peer telemetry, and threat spokes show the emitters' relative bearings; alerts clear when detections coast out or telemetry becomes stale.
+
 ## Terrain
 
 The viewport loads public AWS Open Data Terrain Tiles in Mapzen Terrarium format at zoom level 12, along with aligned Sentinel-2 EOxCloudless imagery for the same 12-by-12 tile neighborhood (four times the previous width). Set a start latitude and longitude on the preflight screen; the simulator maps its local `(0, 0)` position to that point. As the aircraft crosses tile boundaries, the browser loads a cached terrain neighborhood, decodes its PNG pixels into meter elevations, and updates the terrain mesh and satellite texture patches. The mesh samples every fourth elevation pixel to keep rendering costs bounded across the larger area, and distance fog fades the far terrain into the sky. Failed terrain requests are reported in the viewport; unavailable imagery falls back to elevation coloring.
