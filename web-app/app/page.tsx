@@ -648,12 +648,12 @@ export default function Home() {
     async function initSim() {
       try {
         // The generated Emscripten module is served from public/wasm at runtime.
+        const wasmAssetBasePath = `${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/wasm/`;
         const moduleFactory = (
-          // @ts-expect-error This public asset is not part of the TypeScript module graph.
-          await import(/* webpackIgnore: true */ '/wasm/sim-core.js')
+          await import(/* webpackIgnore: true */ `${wasmAssetBasePath}sim-core.js`)
         ).default as SimEngineModuleFactory;
         const wasmModule = await moduleFactory({
-          locateFile: (path: string) => `/wasm/${path}`,
+          locateFile: (path: string) => `${wasmAssetBasePath}${path}`,
         });
         if (disposed) return;
 

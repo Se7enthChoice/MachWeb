@@ -1,11 +1,16 @@
 import type { NextConfig } from "next";
 
+const basePath = "/MachWeb";
+
 const nextConfig: NextConfig = {
   /* config options here */
   //cacheComponents: true,
   //partialPrefetching: true,
   output: 'export',
-  basePath: '/MachWeb',
+  basePath,
+  env: {
+    NEXT_PUBLIC_BASE_PATH: basePath,
+  },
   turbopack: {
     rules: {
       "*.css": {
