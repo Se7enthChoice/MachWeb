@@ -10,6 +10,7 @@ static constexpr float gravity = 32.174f; // ft/s²
 static constexpr float DEG_to_RAD = 3.14159265f / 180.0f; // Conversion factor from degrees to radians
 static constexpr float RAD_to_DEG = 180.0f / 3.14159265f; // Conversion factor from radians to degrees
 static constexpr float M_to_F = 3.28084f; // Conversion factor from meters to feet
+static constexpr float FT_per_NM = 6076.12f; // Conversion factor from feet to nautical miles
 static constexpr float max_airspeed = 850.0f; // Knots
 static constexpr float max_vertical_speed = 19600.0f; // Ft/min
 static constexpr float cruise_airspeed = 300.0f;

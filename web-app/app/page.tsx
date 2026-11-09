@@ -21,7 +21,7 @@ import {
   parseFlightTelemetryMessage,
   waitForIceGatheringComplete,
 } from './webrtc';
-import type { FlightTelemetry } from './webrtc';
+import type { FlightTelemetry, MissileTelemetry } from './webrtc';
 
 interface SimEngineInstance {
   tick(dt: number): void;
@@ -52,6 +52,8 @@ interface SimEngineInstance {
   setRadarEnabled(enabled: boolean): void;
   clearRadarTargets(): void;
   addRadarTarget(id: number, posX: number, altitude: number, posZ: number): boolean;
+  clearMissileTargets(): void;
+  addMissileTarget(id: number, posX: number, altitude: number, posZ: number): boolean;
   getRadarContactCount(): number;
   getRadarContactTargetId(index: number): number;
   getRadarContactRangeNm(index: number): number;
@@ -60,6 +62,20 @@ interface SimEngineInstance {
   getRadarContactAge(index: number): number;
   getRadarScanAzimuth(): number;
   getRadarScanBar(): number;
+  launchMissile(typeId: number): number;
+  getMissileCount(): number;
+  getMissileId(index: number): number;
+  getMissileTypeId(index: number): number;
+  getMissileTargetId(index: number): number;
+  getMissilePosX(index: number): number;
+  getMissileAltitude(index: number): number;
+  getMissilePosZ(index: number): number;
+  getMissileHeading(index: number): number;
+  getMissilePitch(index: number): number;
+  getMissileExploded(index: number): boolean;
+  getMissileImpactTargetId(index: number): number;
+  getMissileTriggersRwr(index: number): boolean;
+  applyMissileImpact(): void;
   delete(): void;
 }
 
@@ -79,6 +95,38 @@ const DEFAULT_LATITUDE = 51.5000;
 const DEFAULT_LONGITUDE = -2.5833;
 
 const MAX_RADAR_TARGETS = 64;
+
+// Generates a UUID without requiring a secure context. crypto.randomUUID() is
+// restricted to secure contexts, but getRandomValues() is available on HTTP
+// LAN origins in supported browsers.
+function createId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(bytes);
+  } else {
+    // Last-resort compatibility fallback for browsers without Web Crypto.
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+
+  // Set the UUID version (4) and variant (RFC 4122) bits.
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0'));
+  return [
+    hex.slice(0, 4).join(''),
+    hex.slice(4, 6).join(''),
+    hex.slice(6, 8).join(''),
+    hex.slice(8, 10).join(''),
+    hex.slice(10, 16).join(''),
+  ].join('-');
+}
 
 // Formats elapsed simulation minutes as a zero-padded 24-hour clock.
 function formatTimeOfDay(totalMinutes: number): string {
@@ -119,7 +167,18 @@ function getRadarWarningContacts(
     sinHeading * cosRoll - cosHeading * sinPitch * sinRoll,
   ];
 
-  return remoteTelemetries
+  const getAzimuth = (relative: number[]) => {
+    const forwardDistance = relative.reduce(
+      (sum, value, index) => sum + value * forward[index],
+      0,
+    );
+    const rightDistance = relative.reduce(
+      (sum, value, index) => sum + value * right[index],
+      0,
+    );
+    return Math.atan2(rightDistance, forwardDistance) * (180 / Math.PI);
+  };
+  const radarWarnings = remoteTelemetries
     .filter(
       telemetry =>
         telemetry.radarDetectedPlayerIds?.includes(localPlayerId) &&
@@ -132,17 +191,35 @@ function getRadarWarningContacts(
         telemetry.altitude - altitude,
         emitter.posZFeet - posZ,
       ];
-      const forwardDistance = relative.reduce(
-        (sum, value, index) => sum + value * forward[index],
-        0,
-      );
-      const rightDistance = relative.reduce(
-        (sum, value, index) => sum + value * right[index],
-        0,
-      );
-      const azimuth = Math.atan2(rightDistance, forwardDistance) * (180 / Math.PI);
-      return { emitterId: telemetry.playerId, azimuth };
+      return { emitterId: telemetry.playerId, azimuth: getAzimuth(relative) };
     });
+  const missileWarnings = remoteTelemetries.flatMap(telemetry => {
+    if (
+      now - (receivedAt.get(telemetry.playerId) ?? 0) > 2000 ||
+      !telemetry.missiles
+    ) {
+      return [];
+    }
+    return telemetry.missiles
+      .filter(
+        missile =>
+          missile.triggersRwr &&
+          !missile.exploded &&
+          missile.targetPlayerId === localPlayerId,
+      )
+      .map(missile => {
+        const missilePosition = getLocalPosition(terrainOrigin, missile);
+        return {
+          emitterId: `missile-${telemetry.playerId}-${missile.missileId}`,
+          azimuth: getAzimuth([
+            missilePosition.posXFeet - posX,
+            missile.altitude - altitude,
+            missilePosition.posZFeet - posZ,
+          ]),
+        };
+      });
+  });
+  return [...radarWarnings, ...missileWarnings];
 }
 
 // Owns preflight state, the Wasm simulation loop, and multiplayer coordination.
@@ -190,6 +267,8 @@ export default function Home() {
   const [radarScanAzimuth, setRadarScanAzimuth] = useState(-60);
   const [radarScanBar, setRadarScanBar] = useState(1);
   const [radarWarnings, setRadarWarnings] = useState<RadarWarningContact[]>([]);
+  const [localPlayerId, setLocalPlayerId] = useState('');
+  const localMissilesRef = useRef<MissileTelemetry[]>([]);
   const [posX, setPosX] = useState<number>(0);
   const [posZ, setPosZ] = useState<number>(0);
   const [status, setStatus] = useState<string>('Initializing flight dynamics...');
@@ -212,6 +291,8 @@ export default function Home() {
   const radarTargetIdsRef = useRef(new Map<string, number>());
   const radarTargetPlayerIdsRef = useRef(new Map<number, string>());
   const nextRadarTargetIdRef = useRef(1);
+  const missileLaunchRequestedRef = useRef(false);
+  const processedMissileImpactsRef = useRef(new Map<string, number>());
   const terrainNeighborhoodKey = getTerrainNeighborhoodKey(terrainOrigin, posX, posZ);
 
   const handleRadarToggle = (): void => {
@@ -231,7 +312,7 @@ export default function Home() {
       setMultiplayerStatus(
         connectedCount === 0
           ? 'No joiners connected. Create an offer for each player.'
-          : `${connectedCount} joiner${connectedCount === 1 ? '' : 's'} connected. The host relays flight data.`,
+          : `${connectedCount} joiner${connectedCount === 1 ? '' : 's'} connected.`,
       );
     }
   };
@@ -438,7 +519,7 @@ export default function Home() {
     if (multiplayerOperationRef.current) return;
     multiplayerOperationRef.current = true;
     setMultiplayerBusy(true);
-    const sessionId = crypto.randomUUID();
+    const sessionId = createId();
     setHostPeerSessions(sessions => [
       ...sessions,
       {
@@ -502,7 +583,7 @@ export default function Home() {
 
     try {
       const connection = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302'}],
       });
       peerConnectionsRef.current.set('host', connection);
       configurePeerConnection(connection, 'host', 'join');
@@ -635,6 +716,10 @@ export default function Home() {
     setTerrainStatus('waiting for flight dynamics');
     setStatus('Loading flight dynamics...');
     setSimulationStarted(true);
+    localMissilesRef.current = [];
+    processedMissileImpactsRef.current.clear();
+    if (!playerIdRef.current) playerIdRef.current = createId();
+    setLocalPlayerId(playerIdRef.current);
   };
 
   // Closes active sessions and restores the preflight defaults.
@@ -659,6 +744,9 @@ export default function Home() {
     setHeading(0);
     setVerticalSpeed(0);
     setCrashed(false);
+    localMissilesRef.current = [];
+    missileLaunchRequestedRef.current = false;
+    processedMissileImpactsRef.current.clear();
   };
 
   // Simulation lifecycle and synchronization effects.
@@ -695,6 +783,14 @@ export default function Home() {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.code)) {
         event.preventDefault();
+      }
+      const target = event.target;
+      const typing =
+        target instanceof HTMLElement &&
+        (target.isContentEditable || target.closest('input, textarea, select'));
+      if (event.code === 'KeyM' && !typing) {
+        event.preventDefault();
+        if (!event.repeat) missileLaunchRequestedRef.current = true;
       }
       keysPressed.add(event.code);
     };
@@ -759,36 +855,54 @@ export default function Home() {
             engineInstance.setRollInput(rollInput);
             engineInstance.setYawInput(yawInput);
             engineInstance.setThrottle(throttleRef.current);
+            if (missileLaunchRequestedRef.current) {
+              missileLaunchRequestedRef.current = false;
+              const launchResult = engineInstance.launchMissile(1);
+              setStatus(
+                launchResult === 2
+                  ? 'Radar-guided missile launched.'
+                  : launchResult === 1
+                    ? 'Unguided missile launched.'
+                    : 'Missile launch rejected: no slot available or track outside 10 NM.',
+              );
+            }
 
-            // Refresh the radar target list from recent multiplayer reports.
-            if (radarEnabledRef.current) {
-              const now = performance.now();
-              const radarTargets = remoteTelemetriesRef.current
-                .filter(
-                  telemetry =>
-                    now -
-                      (remoteTelemetryReceivedAtRef.current.get(telemetry.playerId) ?? 0) <=
-                    2000,
-                )
-                .slice(0, MAX_RADAR_TARGETS);
-              engineInstance.clearRadarTargets();
-              for (const target of radarTargets) {
-                let targetId = radarTargetIdsRef.current.get(target.playerId);
-                if (targetId === undefined) {
-                  targetId = nextRadarTargetIdRef.current;
-                  nextRadarTargetIdRef.current += 1;
-                  radarTargetIdsRef.current.set(target.playerId, targetId);
-                  radarTargetPlayerIdsRef.current.set(targetId, target.playerId);
-                }
-                const targetPosition = getLocalPosition(terrainOrigin, target);
-                if (!engineInstance.addRadarTarget(
-                  targetId,
-                  targetPosition.posXFeet,
-                  target.altitude,
-                  targetPosition.posZFeet,
-                )) {
-                  setStatus('Radar could not accept an aircraft target.');
-                }
+            // Refresh collision targets even if radar is powered off or has no acquired tracks.
+            const now = performance.now();
+            const recentAircraftTargets = remoteTelemetriesRef.current
+              .filter(
+                telemetry =>
+                  now -
+                    (remoteTelemetryReceivedAtRef.current.get(telemetry.playerId) ?? 0) <=
+                  2000,
+              )
+              .slice(0, MAX_RADAR_TARGETS);
+            engineInstance.clearMissileTargets();
+            if (radarEnabledRef.current) engineInstance.clearRadarTargets();
+            for (const target of recentAircraftTargets) {
+              let targetId = radarTargetIdsRef.current.get(target.playerId);
+              if (targetId === undefined) {
+                targetId = nextRadarTargetIdRef.current;
+                nextRadarTargetIdRef.current += 1;
+                radarTargetIdsRef.current.set(target.playerId, targetId);
+                radarTargetPlayerIdsRef.current.set(targetId, target.playerId);
+              }
+              const targetPosition = getLocalPosition(terrainOrigin, target);
+              if (!engineInstance.addMissileTarget(
+                targetId,
+                targetPosition.posXFeet,
+                target.altitude,
+                targetPosition.posZFeet,
+              )) {
+                setStatus('Missile system could not accept an aircraft target.');
+              }
+              if (radarEnabledRef.current && !engineInstance.addRadarTarget(
+                targetId,
+                targetPosition.posXFeet,
+                target.altitude,
+                targetPosition.posZFeet,
+              )) {
+                setStatus('Radar could not accept an aircraft target.');
               }
             }
 
@@ -809,6 +923,26 @@ export default function Home() {
               setStatus('Flight dynamics halted: invalid telemetry');
               return;
             }
+
+            // Apply each fresh remote hit once so repeated relay snapshots cannot extend damage.
+            for (const remote of remoteTelemetriesRef.current) {
+              if (
+                remote.playerId === playerIdRef.current ||
+                now - (remoteTelemetryReceivedAtRef.current.get(remote.playerId) ?? 0) > 2000
+              ) {
+                continue;
+              }
+              for (const missile of remote.missiles ?? []) {
+                if (!missile.exploded || missile.impactPlayerId !== playerIdRef.current) continue;
+                const impactKey = `${remote.playerId}:${missile.missileId}`;
+                if (processedMissileImpactsRef.current.has(impactKey)) continue;
+                processedMissileImpactsRef.current.set(impactKey, now);
+                engineInstance.applyMissileImpact();
+              }
+            }
+            processedMissileImpactsRef.current.forEach((time, impactKey) => {
+              if (now - time > 30_000) processedMissileImpactsRef.current.delete(impactKey);
+            });
 
             const [
               nextPosX,
@@ -832,6 +966,34 @@ export default function Home() {
             setVerticalSpeed(nextVerticalSpeed);
             const nextCrashed = engineInstance.getCrashed();
             setCrashed(nextCrashed);
+
+            const missileEngine = engineInstance;
+            const readMissiles = (): MissileTelemetry[] =>
+              Array.from({ length: missileEngine.getMissileCount() }, (_, index) => {
+                const missilePosition = getAircraftCoordinates(
+                  terrainOrigin,
+                  missileEngine.getMissilePosX(index),
+                  missileEngine.getMissilePosZ(index),
+                );
+                const targetId = missileEngine.getMissileTargetId(index);
+                return {
+                  missileId: missileEngine.getMissileId(index),
+                  typeId: missileEngine.getMissileTypeId(index),
+                  ...missilePosition,
+                  altitude: missileEngine.getMissileAltitude(index),
+                  heading: missileEngine.getMissileHeading(index),
+                  pitch: missileEngine.getMissilePitch(index),
+                  exploded: missileEngine.getMissileExploded(index),
+                  triggersRwr: missileEngine.getMissileTriggersRwr(index),
+                  targetPlayerId:
+                    radarTargetPlayerIdsRef.current.get(targetId) ?? null,
+                  impactPlayerId:
+                    radarTargetPlayerIdsRef.current.get(
+                      missileEngine.getMissileImpactTargetId(index),
+                    ) ?? null,
+                };
+              });
+            localMissilesRef.current = readMissiles();
 
             // Read radar returns at 10 Hz instead of triggering a render every frame.
             if (radarEnabledRef.current) {
@@ -884,7 +1046,7 @@ export default function Home() {
                 nextPosX,
                 nextPosZ,
               );
-              if (!playerIdRef.current) playerIdRef.current = crypto.randomUUID();
+              if (!playerIdRef.current) playerIdRef.current = createId();
               const telemetryEngine = engineInstance;
               const radarDetectedPlayerIds = telemetryEngine
                 ? Array.from(
@@ -912,6 +1074,7 @@ export default function Home() {
                 sequence: telemetrySequenceRef.current,
                 simulationTimeMinutes: simulationTimeRef.current,
                 radarDetectedPlayerIds,
+                missiles: readMissiles(),
               };
               telemetrySequenceRef.current += 1;
               const message = JSON.stringify({ type: 'telemetry', telemetry });
@@ -1080,6 +1243,8 @@ export default function Home() {
             heading={heading}
             airspeed={airspeed}
             crashed={crashed}
+            localPlayerId={localPlayerId}
+            localMissilesRef={localMissilesRef}
             radarEnabled={radarEnabled}
             remoteTelemetries={Object.values(remoteTelemetryByPlayer)}
             radarContacts={radarContacts}
@@ -1135,6 +1300,10 @@ export default function Home() {
             </div>
             <div>
               <strong className="text-emerald-400">SHIFT / CTRL</strong>: Throttle up / down
+            </div>
+            <div className="col-span-2">
+              <strong className="text-emerald-400">M</strong>: Launch missile (radar-guided on a
+              track within 10 NM; otherwise straight ahead)
             </div>
           </div>
           <div className="mt-4 flex justify-end">

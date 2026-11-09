@@ -29,6 +29,10 @@ private:
     float yawInput = 0.0f;
 
 public:
+    // Applies the standard three-second damage/crash indication.
+    void applyMissileImpact() {
+        crashTimeRemaining = std::max(crashTimeRemaining, crashed_duration);
+    }
     void tick(float dt, const Terrain& terrain);
 
     void setPitchInput(float value);

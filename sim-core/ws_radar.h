@@ -54,6 +54,11 @@ public:
     float getContactAzimuth(int index) const;
     float getContactElevation(int index) const;
     float getContactAge(int index) const;
+    bool getTargetPosition(
+        std::uint32_t targetId,
+        float& posX,
+        float& altitude,
+        float& posZ) const;
     // Reports the beam position and elevation-bar number currently being scanned.
     float getScanAzimuth() const;
     int getScanBar() const;

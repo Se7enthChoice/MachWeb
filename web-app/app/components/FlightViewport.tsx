@@ -1,10 +1,11 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import type { RefObject } from 'react';
 import * as THREE from 'three';
 import { getAircraftCoordinates, getLocalPosition, getSatelliteTileUrl } from '../terrain';
 import type { TerrainGrid, TerrainOrigin } from '../terrain';
-import type { FlightTelemetry } from '../webrtc';
+import type { FlightTelemetry, MissileTelemetry } from '../webrtc';
 import RadarScope from './RadarScope';
 import type { RadarContact } from './RadarScope';
 import RadarWarningReceiver from './RadarWarningReceiver';
@@ -21,6 +22,8 @@ interface FlightViewportProps {
   heading: number;
   airspeed: number;
   crashed: boolean;
+  localPlayerId: string;
+  localMissilesRef: RefObject<MissileTelemetry[]>;
   radarEnabled: boolean;
   remoteTelemetries: FlightTelemetry[];
   radarContacts: RadarContact[];
@@ -49,6 +52,27 @@ interface RemoteAircraftInstance {
   lastSequence: number;
 }
 
+interface ExplosionEffect {
+  group: THREE.Group;
+  particles: THREE.Points;
+  positions: Float32Array;
+  velocities: Float32Array;
+  startedAt: number;
+}
+
+interface MissileVisualSample {
+  position: THREE.Vector3;
+  heading: number;
+  pitch: number;
+  receivedAt: number;
+}
+
+interface MissileVisualInstance {
+  model: THREE.Group;
+  samples: MissileVisualSample[];
+  locallySimulated: boolean;
+}
+
 const visualScale = 0.01;
 const feetPerMeter = 3.28084;
 const REMOTE_INTERPOLATION_DELAY_MS = 150;
@@ -75,6 +99,8 @@ const terrainColors = [
   new THREE.Color(0x9b9587),
   new THREE.Color(0xd7d8d1),
 ];
+const EXPLOSION_PARTICLE_COUNT = 32;
+const EXPLOSION_DURATION_MS = 1500;
 
 // Selects a fallback vertex color based on terrain elevation in meters.
 function terrainColor(elevationMeters: number): THREE.Color {
@@ -232,6 +258,104 @@ function createRemoteAircraft(color: number): { aircraft: THREE.Group; lights: T
   return { aircraft, lights };
 }
 
+// Builds a small forward-pointing missile model in its own local coordinate frame.
+function createMissile(): THREE.Group {
+  const missile = new THREE.Group();
+  const bodyMaterial = new THREE.MeshBasicMaterial({ color: 0xd1d5db });
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.022, 0.26, 8), bodyMaterial);
+  body.rotation.x = -Math.PI / 2;
+  missile.add(body);
+
+  const nose = new THREE.Mesh(
+    new THREE.ConeGeometry(0.022, 0.12, 8),
+    new THREE.MeshBasicMaterial({ color: 0xf8fafc }),
+  );
+  nose.rotation.x = -Math.PI / 2;
+  nose.position.z = -0.19;
+  missile.add(nose);
+
+  const exhaust = new THREE.Mesh(
+    new THREE.SphereGeometry(0.025, 6, 6),
+    new THREE.MeshBasicMaterial({ color: 0xff8a35 }),
+  );
+  exhaust.position.z = 0.16;
+  missile.add(exhaust);
+  return missile;
+}
+
+function disposeMissile(scene: THREE.Scene, missile: THREE.Group): void {
+  scene.remove(missile);
+  missile.traverse(object => {
+    if (!(object instanceof THREE.Mesh)) return;
+    object.geometry.dispose();
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    materials.forEach(material => material.dispose());
+  });
+}
+
+// Creates a brief, additive particle burst at an impact location.
+function createExplosion(scene: THREE.Scene, position: THREE.Vector3): ExplosionEffect {
+  const positions = new Float32Array(EXPLOSION_PARTICLE_COUNT * 3);
+  const colors = new Float32Array(EXPLOSION_PARTICLE_COUNT * 3);
+  const velocities = new Float32Array(EXPLOSION_PARTICLE_COUNT * 3);
+  for (let index = 0; index < EXPLOSION_PARTICLE_COUNT; index += 1) {
+    const offset = index * 3;
+    const direction = new THREE.Vector3(
+      Math.random() * 2 - 1,
+      Math.random() * 2 - 1,
+      Math.random() * 2 - 1,
+    ).normalize();
+    const speed = 2 + Math.random() * 7;
+    velocities[offset] = direction.x * speed;
+    velocities[offset + 1] = direction.y * speed;
+    velocities[offset + 2] = direction.z * speed;
+    colors[offset] = 1;
+    colors[offset + 1] = 0.25 + Math.random() * 0.6;
+    colors[offset + 2] = Math.random() * 0.12;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  const particles = new THREE.Points(
+    geometry,
+    new THREE.PointsMaterial({
+      size: 0.18,
+      vertexColors: true,
+      transparent: true,
+      opacity: 1,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  const flash = new THREE.Mesh(
+    new THREE.SphereGeometry(0.35, 10, 8),
+    new THREE.MeshBasicMaterial({
+      color: 0xffb347,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  const group = new THREE.Group();
+  group.position.copy(position);
+  group.add(particles, flash);
+  scene.add(group);
+  return { group, particles, positions, velocities, startedAt: performance.now() };
+}
+
+function disposeExplosion(scene: THREE.Scene, effect: ExplosionEffect): void {
+  scene.remove(effect.group);
+  effect.group.traverse(object => {
+    if (object instanceof THREE.Points || object instanceof THREE.Mesh) {
+      object.geometry.dispose();
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      materials.forEach(material => material.dispose());
+    }
+  });
+}
+
 // Releases geometry and material resources owned by a remote-aircraft model.
 function disposeRemoteAircraft(aircraft: THREE.Group): void {
   aircraft.traverse(object => {
@@ -265,6 +389,8 @@ export default function FlightViewport({
   heading,
   airspeed,
   crashed,
+  localPlayerId,
+  localMissilesRef,
   radarEnabled,
   remoteTelemetries,
   radarContacts,
@@ -284,8 +410,12 @@ export default function FlightViewport({
   const sceneRef = useRef<THREE.Scene | null>(null);
   const simulationTimeRef = useRef(simulationTimeMinutes);
   const terrainOriginRef = useRef(terrainOrigin);
+  const localPlayerIdRef = useRef(localPlayerId);
   const fallbackGroundRef = useRef<THREE.Group | null>(null);
   const remoteAircraftRef = useRef(new Map<string, RemoteAircraftInstance>());
+  const missileInstancesRef = useRef(new Map<string, MissileVisualInstance>());
+  const explosionEffectsRef = useRef<ExplosionEffect[]>([]);
+  const seenExplosionsRef = useRef(new Map<string, number>());
   const terrainMeshesRef = useRef<
     Array<THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial>>
   >([]);
@@ -299,6 +429,9 @@ export default function FlightViewport({
     const currentMount = mountRef.current;
     if (!currentMount) return;
     const remoteAircrafts = remoteAircraftRef.current;
+    const missileInstances = missileInstancesRef.current;
+    const explosionEffects = explosionEffectsRef.current;
+    const seenExplosions = seenExplosionsRef.current;
 
     // 1. Scene
     const scene = new THREE.Scene();
@@ -404,6 +537,7 @@ export default function FlightViewport({
     const animate = () => {
       animId = requestAnimationFrame(animate);
       const timeMinutes = simulationTimeRef.current;
+      const now = performance.now();
       const renderTime = performance.now() - REMOTE_INTERPOLATION_DELAY_MS;
       for (const instance of remoteAircrafts.values()) {
         const { aircraft, lights, samples } = instance;
@@ -414,7 +548,6 @@ export default function FlightViewport({
           aircraft.visible = false;
           continue;
         }
-
         const first = samples[0];
         const second = samples[1];
         const amount = second
@@ -443,6 +576,121 @@ export default function FlightViewport({
           interpolateAngle(start.roll, end.roll, amount),
         );
       }
+
+      for (const [key, missile] of missileInstances) {
+        const ownerId = key.slice(0, key.lastIndexOf(':'));
+        const remote = remoteAircrafts.get(ownerId);
+        missile.model.visible =
+          !remote ||
+          (remote.samples.length > 0 &&
+            now - remote.samples[remote.samples.length - 1].receivedAt <= 2000);
+        if (missile.locallySimulated) {
+          const sample = missile.samples[missile.samples.length - 1];
+          missile.model.position.copy(sample.position);
+          missile.model.rotation.order = 'YXZ';
+          missile.model.rotation.y = -THREE.MathUtils.degToRad(sample.heading);
+          missile.model.rotation.x = THREE.MathUtils.degToRad(sample.pitch);
+          continue;
+        }
+        while (
+          missile.samples.length > 2 &&
+          missile.samples[1].receivedAt <= renderTime
+        ) {
+          missile.samples.shift();
+        }
+        const first = missile.samples[0];
+        const second = missile.samples[1];
+        const interval = second ? second.receivedAt - first.receivedAt : 0;
+        const amount = interval > 0
+          ? THREE.MathUtils.clamp((renderTime - first.receivedAt) / interval, 0, 1)
+          : 0;
+        missile.model.position.lerpVectors(
+          first.position,
+          second?.position ?? first.position,
+          amount,
+        );
+        missile.model.rotation.order = 'YXZ';
+        missile.model.rotation.y = -THREE.MathUtils.degToRad(
+          interpolateAngle(first.heading, second?.heading ?? first.heading, amount),
+        );
+        missile.model.rotation.x = THREE.MathUtils.degToRad(
+          THREE.MathUtils.lerp(first.pitch, second?.pitch ?? first.pitch, amount),
+        );
+      }
+
+      const activeLocalMissiles = new Set<string>();
+      const localSnapshots = localMissilesRef.current;
+      for (const missile of localSnapshots) {
+        const key = `${localPlayerIdRef.current}:${missile.missileId}`;
+        const position = getLocalPosition(terrainOriginRef.current, missile);
+        const sample: MissileVisualSample = {
+          position: new THREE.Vector3(
+            position.posXFeet * visualScale,
+            missile.altitude * visualScale,
+            position.posZFeet * visualScale,
+          ),
+          heading: missile.heading,
+          pitch: missile.pitch,
+          receivedAt: now,
+        };
+        if (missile.exploded) {
+          if (!seenExplosions.has(key)) {
+            seenExplosions.set(key, now);
+            explosionEffects.push(createExplosion(scene, sample.position));
+          }
+          const existing = missileInstances.get(key);
+          if (existing) {
+            disposeMissile(scene, existing.model);
+            missileInstances.delete(key);
+          }
+          continue;
+        }
+
+        activeLocalMissiles.add(key);
+        let instance = missileInstances.get(key);
+        if (!instance) {
+          const model = createMissile();
+          scene.add(model);
+          instance = { model, samples: [sample], locallySimulated: true };
+          missileInstances.set(key, instance);
+        } else {
+          instance.samples[0] = sample;
+        }
+      }
+
+      for (const [key, instance] of missileInstances) {
+        if (!instance.locallySimulated || activeLocalMissiles.has(key)) continue;
+        disposeMissile(scene, instance.model);
+        missileInstances.delete(key);
+      }
+
+      const survivingEffects: ExplosionEffect[] = [];
+      for (const effect of explosionEffects) {
+        const ageSeconds = (now - effect.startedAt) / 1000;
+        if (ageSeconds * 1000 >= EXPLOSION_DURATION_MS) {
+          disposeExplosion(scene, effect);
+          continue;
+        }
+        for (let index = 0; index < EXPLOSION_PARTICLE_COUNT; index += 1) {
+          const offset = index * 3;
+          effect.positions[offset] = effect.velocities[offset] * ageSeconds;
+          effect.positions[offset + 1] =
+            effect.velocities[offset + 1] * ageSeconds - 1.8 * ageSeconds * ageSeconds;
+          effect.positions[offset + 2] = effect.velocities[offset + 2] * ageSeconds;
+        }
+        effect.particles.geometry.attributes.position.needsUpdate = true;
+        effect.particles.geometry.computeBoundingSphere();
+        const fade = 1 - ageSeconds * 1000 / EXPLOSION_DURATION_MS;
+        (effect.particles.material as THREE.PointsMaterial).opacity = fade;
+        const flash = effect.group.children[1];
+        if (flash instanceof THREE.Mesh) {
+          flash.scale.setScalar(1 + ageSeconds * 7);
+          (flash.material as THREE.MeshBasicMaterial).opacity = fade * 0.9;
+        }
+        survivingEffects.push(effect);
+      }
+      explosionEffects.length = 0;
+      explosionEffects.push(...survivingEffects);
 
       const currentDate = new Date();
       const solarDate = new Date(
@@ -523,7 +771,11 @@ export default function FlightViewport({
       cancelAnimationFrame(animId);
       scene.traverse(object => {
         if (object instanceof THREE.DirectionalLight) object.shadow.dispose();
-        if (object instanceof THREE.Mesh || object instanceof THREE.LineSegments) {
+        if (
+          object instanceof THREE.Mesh ||
+          object instanceof THREE.LineSegments ||
+          object instanceof THREE.Points
+        ) {
           object.geometry.dispose();
           const materials = Array.isArray(object.material) ? object.material : [object.material];
           materials.forEach(material => {
@@ -540,9 +792,12 @@ export default function FlightViewport({
       sceneRef.current = null;
       fallbackGroundRef.current = null;
       remoteAircrafts.clear();
+      missileInstances.clear();
+      explosionEffects.length = 0;
+      seenExplosions.clear();
       terrainMeshesRef.current = [];
     };
-  }, []);
+  }, [localMissilesRef, localPlayerIdRef]);
 
   // Keeps the displayed simulation time available to the render loop.
   useEffect(() => {
@@ -553,6 +808,10 @@ export default function FlightViewport({
   useEffect(() => {
     terrainOriginRef.current = terrainOrigin;
   }, [terrainOrigin]);
+
+  useEffect(() => {
+    localPlayerIdRef.current = localPlayerId;
+  }, [localPlayerId]);
 
   // Builds terrain meshes and progressively loads imagery without blocking frames.
   useEffect(() => {
@@ -839,6 +1098,77 @@ export default function FlightViewport({
       }
     }
   }, [remoteTelemetries, terrainOrigin]);
+
+  // Synchronizes local and relayed missile snapshots into shared scene objects.
+  useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    const snapshots = [
+      ...remoteTelemetries.flatMap(telemetry =>
+        (telemetry.missiles ?? []).map(missile => ({
+          ...missile,
+          ownerId: telemetry.playerId,
+        })),
+      ),
+    ];
+    const activeKeys = new Set<string>();
+
+    for (const missile of snapshots) {
+      if (missile.ownerId === localPlayerIdRef.current) continue;
+      const key = `${missile.ownerId}:${missile.missileId}`;
+      const position = getLocalPosition(terrainOrigin, missile);
+      const worldPosition = new THREE.Vector3(
+        position.posXFeet * visualScale,
+        missile.altitude * visualScale,
+        position.posZFeet * visualScale,
+      );
+      if (missile.exploded) {
+        if (!seenExplosionsRef.current.has(key)) {
+          seenExplosionsRef.current.set(key, performance.now());
+          explosionEffectsRef.current.push(createExplosion(scene, worldPosition));
+        }
+        const existing = missileInstancesRef.current.get(key);
+        if (existing) {
+          disposeMissile(scene, existing.model);
+          missileInstancesRef.current.delete(key);
+        }
+        continue;
+      }
+
+      activeKeys.add(key);
+      let instance = missileInstancesRef.current.get(key);
+      const receivedAt = performance.now();
+      const sample: MissileVisualSample = {
+        position: worldPosition,
+        heading: missile.heading,
+        pitch: missile.pitch,
+        receivedAt,
+      };
+      if (!instance) {
+        const model = createMissile();
+        scene.add(model);
+        instance = { model, samples: [sample], locallySimulated: false };
+        missileInstancesRef.current.set(key, instance);
+      } else {
+        const lastSample = instance.samples[instance.samples.length - 1];
+        if (receivedAt > lastSample.receivedAt) instance.samples.push(sample);
+        if (instance.samples.length > MAX_REMOTE_SAMPLES) {
+          instance.samples.splice(0, instance.samples.length - MAX_REMOTE_SAMPLES);
+        }
+      }
+    }
+
+    for (const [key, instance] of missileInstancesRef.current) {
+      if (instance.locallySimulated || activeKeys.has(key)) continue;
+      disposeMissile(scene, instance.model);
+      missileInstancesRef.current.delete(key);
+    }
+
+    const now = performance.now();
+    seenExplosionsRef.current.forEach((time, key) => {
+      if (now - time > 10_000) seenExplosionsRef.current.delete(key);
+    });
+  }, [localPlayerId, remoteTelemetries, terrainOrigin]);
 
   const imageryStatus =
     terrainGrid && imageryProgress?.grid === terrainGrid

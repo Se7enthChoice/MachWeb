@@ -17,6 +17,22 @@ export interface FlightTelemetry {
   sequence: number;
   simulationTimeMinutes: number;
   radarDetectedPlayerIds?: string[];
+  missiles?: MissileTelemetry[];
+}
+
+// Network-safe missile snapshot; exploded missiles retain impactPlayerId for crash reporting.
+export interface MissileTelemetry {
+  missileId: number; // Unique within the launching player's current flight.
+  typeId: number; // Selects the C++ missile profile used for this launch.
+  latitude: number;
+  longitude: number;
+  altitude: number;
+  heading: number;
+  pitch: number;
+  exploded: boolean; // Keeps the impact visible while the explosion effect is reported.
+  triggersRwr: boolean; // Whether this in-flight weapon is an RWR threat.
+  targetPlayerId: string | null; // Intended radar target; null for an unguided launch.
+  impactPlayerId?: string | null; // Aircraft actually hit
 }
 
 // Encodes a WebRTC description as a UTF-8-safe Base64 string for manual exchange.
@@ -116,6 +132,45 @@ function isFlightTelemetry(value: unknown): value is FlightTelemetry {
     'simulationTimeMinutes',
   ];
 
+  const validMissiles =
+    value.missiles === undefined ||
+    (Array.isArray(value.missiles) &&
+      value.missiles.length <= 16 &&
+      value.missiles.every(missile =>
+        isRecord(missile) &&
+        typeof missile.missileId === 'number' &&
+        Number.isSafeInteger(missile.missileId) &&
+        missile.missileId > 0 &&
+        typeof missile.typeId === 'number' &&
+        Number.isSafeInteger(missile.typeId) &&
+        missile.typeId > 0 &&
+        typeof missile.latitude === 'number' &&
+        Number.isFinite(missile.latitude) &&
+        missile.latitude >= -90 &&
+        missile.latitude <= 90 &&
+        typeof missile.longitude === 'number' &&
+        Number.isFinite(missile.longitude) &&
+        missile.longitude >= -180 &&
+        missile.longitude <= 180 &&
+        typeof missile.altitude === 'number' &&
+        Number.isFinite(missile.altitude) &&
+        typeof missile.heading === 'number' &&
+        Number.isFinite(missile.heading) &&
+        typeof missile.pitch === 'number' &&
+        Number.isFinite(missile.pitch) &&
+        typeof missile.exploded === 'boolean' &&
+        typeof missile.triggersRwr === 'boolean' &&
+        (missile.targetPlayerId === null ||
+          (typeof missile.targetPlayerId === 'string' &&
+            missile.targetPlayerId.length > 0 &&
+            missile.targetPlayerId.length <= 64)) &&
+        (missile.impactPlayerId === undefined ||
+          missile.impactPlayerId === null ||
+          (typeof missile.impactPlayerId === 'string' &&
+            missile.impactPlayerId.length > 0 &&
+            missile.impactPlayerId.length <= 64)),
+      ));
+
   return (
     numericFields.every(field => {
       const fieldValue = value[field];
@@ -131,7 +186,8 @@ function isFlightTelemetry(value: unknown): value is FlightTelemetry {
         value.radarDetectedPlayerIds.every(
           playerId =>
             typeof playerId === 'string' && playerId.length > 0 && playerId.length <= 64,
-        )))
+          ))) &&
+    validMissiles
   );
 }
 

@@ -9,6 +9,7 @@ add_executable(sim-core
     env_terrain.cpp
     fm_aircraft.cpp
     ws_radar.cpp
+    ws_msl.cpp
 )
 
 # Emscripten specific link flags

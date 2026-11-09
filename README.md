@@ -13,6 +13,8 @@ MachWeb/
 │   ├── fm_aircraft.h                 # Flight model interface and aircraft state
 │   ├── ws_radar.cpp                  # Scanning airborne radar and contact tracking
 │   ├── ws_radar.h                    # Radar subsystem interface
+│   ├── ws_msl.cpp                    # Missile guidance, flight, range, and impact
+│   ├── ws_msl.h                      # Extensible missile type and simulation interfaces
 │   ├── utils.h                       # Shared constants and vector/angle math helpers
 │   ├── CMakeLists.txt                # CMake target and Emscripten linker configuration
 │   └── build/                        # Generated CMake/Ninja output (created by the build)
@@ -137,6 +139,7 @@ Open your browser and navigate to http://localhost:3000.
 - **A / D**: Bank for turns
 - **Q / E**: Rudder yaw / sideslip
 - **Shift / Ctrl**: Increase / decrease throttle
+- **M**: Launch a missile
 
 Configure the start location on the preflight screen before selecting **Start Flight**. The location controls are not available while the simulation is running. Select **End Flight** to return to setup; doing so ends the current flight, and the next start creates a fresh simulation.
 
@@ -150,6 +153,12 @@ Pitch, roll, and rudder controls have speed-sensitive response and aerodynamic d
 The radar scope searches a 120-degree azimuth sector, a 32-degree elevation volume, and out to 40 nautical miles, using four elevation bars and a 2.4-second scan cycle. A contact is acquired only while the simulated beam overlaps an aircraft in azimuth, elevation, and range, and terrain along the line of sight does not block the return; detections coast for 3.6 seconds between scans. In multiplayer, aircraft with fresh telemetry are supplied to the simulation radar and appear on the heading-up scope with range and relative angles.
 
 The bearing-only radar warning receiver appears alongside the radar scope only when a multiplayer peer's radar has detected the local aircraft. Detected player IDs travel with peer telemetry, and threat spokes show the emitters' relative bearings; alerts clear when detections coast out or telemetry becomes stale.
+
+## Missiles
+
+Press **M** to launch the generic missile. The C++ weapon system selects the nearest active radar track within its 10-nautical-mile maximum range; with no radar tracks it launches unguided along the aircraft's forward direction. A guided missile steers toward the target track, accelerates to 900 knots, and is limited to 25 degrees per second and 20 g of lateral acceleration. It explodes on aircraft or terrain impact, at maximum range, or after its 50-second flight-time fuse expires. Aircraft hit within the missile's 200-foot impact radius show **CRASHED** for three seconds. Missile state and impact events are included in relayed telemetry so every multiplayer client renders the same launches and impacts. The missile type configuration includes range, speed, lifetime, guidance, turn, and RWR-warning settings for adding other weapons later.
+
+Incoming generic missiles targeting the local aircraft appear as threat bearings on the radar warning receiver. Missile telemetry is validated and bounded before it is relayed to other peers.
 
 ## Terrain
 

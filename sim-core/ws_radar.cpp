@@ -101,7 +101,7 @@ void Radar::tick(
                 target.posZ - posZ,
             };
             const float distanceFeet = std::sqrt(dot(relative, relative));
-            const float rangeNm = distanceFeet / feetPerNauticalMile;
+            const float rangeNm = distanceFeet / FT_per_NM;
             if (rangeNm <= 0.0f || rangeNm > maxRangeNm) continue;
 
             // These angles are body-relative, so aircraft pitch and roll affect coverage.
@@ -194,6 +194,22 @@ float Radar::getContactAge(int index) const {
     return track
         ? static_cast<float>(std::max(0.0, radarTime - track->lastDetectionTime))
         : 0.0f;
+}
+
+bool Radar::getTargetPosition(
+    std::uint32_t targetId,
+    float& posX,
+    float& altitude,
+    float& posZ) const {
+    for (int index = 0; index < targetCount; ++index) {
+        const Target& target = targets[index];
+        if (target.id != targetId) continue;
+        posX = target.posX;
+        altitude = target.altitude;
+        posZ = target.posZ;
+        return true;
+    }
+    return false;
 }
 
 // The UI uses these values to animate the beam without driving radar behavior.
