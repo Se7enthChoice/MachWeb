@@ -76,6 +76,9 @@ interface MissileVisualInstance {
 const visualScale = 0.01;
 const feetPerMeter = 3.28084;
 const REMOTE_INTERPOLATION_DELAY_MS = 150;
+const REMOTE_MISSILE_INTERPOLATION_DELAY_MS = 50;
+const MAX_MISSILE_EXTRAPOLATION_MS = 200;
+const MISSILE_VISUAL_SMOOTHING_SECONDS = 0.035;
 const MAX_REMOTE_SAMPLES = 20;
 const REMOTE_AIRCRAFT_COLORS = [0x38bdf8, 0xfbbf24, 0xf472b6, 0xa3e635, 0xc084fc];
 const TERRAIN_MESH_SEGMENTS = 64;
@@ -116,6 +119,11 @@ function terrainColor(elevationMeters: number): THREE.Color {
 function interpolateAngle(start: number, end: number, amount: number): number {
   const delta = THREE.MathUtils.euclideanModulo(end - start + 180, 360) - 180;
   return start + delta * amount;
+}
+
+function smoothAngle(current: number, target: number, amount: number): number {
+  const delta = Math.atan2(Math.sin(target - current), Math.cos(target - current));
+  return current + delta * amount;
 }
 
 // Estimates the sun's elevation and azimuth for local time and position.
@@ -515,6 +523,7 @@ export default function FlightViewport({
     const lightTarget = new THREE.Vector3();
     const sunDirection = new THREE.Vector3();
     const moonDirection = new THREE.Vector3();
+    const missileTargetPosition = new THREE.Vector3();
     const skyColor = new THREE.Color();
     const ambientColor = new THREE.Color();
     const sunlightColor = new THREE.Color();
@@ -533,12 +542,19 @@ export default function FlightViewport({
     resizeObserver.observe(currentMount);
 
     let animId: number;
+    let previousFrameTime = performance.now();
     // Interpolates remote traffic and updates time-dependent lighting each frame.
     const animate = () => {
       animId = requestAnimationFrame(animate);
       const timeMinutes = simulationTimeRef.current;
       const now = performance.now();
-      const renderTime = performance.now() - REMOTE_INTERPOLATION_DELAY_MS;
+      const frameSeconds = Math.min(Math.max((now - previousFrameTime) / 1000, 0), 0.1);
+      previousFrameTime = now;
+      const missileSmoothing = 1 - Math.exp(
+        -frameSeconds / MISSILE_VISUAL_SMOOTHING_SECONDS,
+      );
+      const renderTime = now - REMOTE_INTERPOLATION_DELAY_MS;
+      const missileRenderTime = now - REMOTE_MISSILE_INTERPOLATION_DELAY_MS;
       for (const instance of remoteAircrafts.values()) {
         const { aircraft, lights, samples } = instance;
         lights.visible = timeMinutes >= 18 * 60 || timeMinutes < 6 * 60;
@@ -594,7 +610,7 @@ export default function FlightViewport({
         }
         while (
           missile.samples.length > 2 &&
-          missile.samples[1].receivedAt <= renderTime
+          missile.samples[1].receivedAt <= missileRenderTime
         ) {
           missile.samples.shift();
         }
@@ -602,19 +618,48 @@ export default function FlightViewport({
         const second = missile.samples[1];
         const interval = second ? second.receivedAt - first.receivedAt : 0;
         const amount = interval > 0
-          ? THREE.MathUtils.clamp((renderTime - first.receivedAt) / interval, 0, 1)
+          ? THREE.MathUtils.clamp(
+              (missileRenderTime - first.receivedAt) / interval,
+              0,
+              1,
+            )
           : 0;
-        missile.model.position.lerpVectors(
+        missileTargetPosition.lerpVectors(
           first.position,
           second?.position ?? first.position,
           amount,
         );
+        if (second && interval > 0 && missileRenderTime > second.receivedAt) {
+          // Dead-reckon briefly through delayed packets instead of freezing, then jumping.
+          const extrapolationMs = Math.min(
+            missileRenderTime - second.receivedAt,
+            MAX_MISSILE_EXTRAPOLATION_MS,
+          );
+          const extrapolationRatio = extrapolationMs / interval;
+          missileTargetPosition.x +=
+            (second.position.x - first.position.x) * extrapolationRatio;
+          missileTargetPosition.y +=
+            (second.position.y - first.position.y) * extrapolationRatio;
+          missileTargetPosition.z +=
+            (second.position.z - first.position.z) * extrapolationRatio;
+        }
+        missile.model.position.lerp(missileTargetPosition, missileSmoothing);
         missile.model.rotation.order = 'YXZ';
-        missile.model.rotation.y = -THREE.MathUtils.degToRad(
+        const targetHeading = -THREE.MathUtils.degToRad(
           interpolateAngle(first.heading, second?.heading ?? first.heading, amount),
         );
-        missile.model.rotation.x = THREE.MathUtils.degToRad(
+        missile.model.rotation.y = smoothAngle(
+          missile.model.rotation.y,
+          targetHeading,
+          missileSmoothing,
+        );
+        const targetPitch = THREE.MathUtils.degToRad(
           THREE.MathUtils.lerp(first.pitch, second?.pitch ?? first.pitch, amount),
+        );
+        missile.model.rotation.x = THREE.MathUtils.lerp(
+          missile.model.rotation.x,
+          targetPitch,
+          missileSmoothing,
         );
       }
 
@@ -650,6 +695,10 @@ export default function FlightViewport({
         let instance = missileInstances.get(key);
         if (!instance) {
           const model = createMissile();
+          model.position.copy(sample.position);
+          model.rotation.order = 'YXZ';
+          model.rotation.y = -THREE.MathUtils.degToRad(sample.heading);
+          model.rotation.x = THREE.MathUtils.degToRad(sample.pitch);
           scene.add(model);
           instance = { model, samples: [sample], locallySimulated: true };
           missileInstances.set(key, instance);
@@ -1146,6 +1195,10 @@ export default function FlightViewport({
       };
       if (!instance) {
         const model = createMissile();
+        model.position.copy(worldPosition);
+        model.rotation.order = 'YXZ';
+        model.rotation.y = -THREE.MathUtils.degToRad(missile.heading);
+        model.rotation.x = THREE.MathUtils.degToRad(missile.pitch);
         scene.add(model);
         instance = { model, samples: [sample], locallySimulated: false };
         missileInstancesRef.current.set(key, instance);

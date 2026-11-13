@@ -14,7 +14,7 @@ constexpr std::array<MissileTypeConfig, 1> missileTypes = {{
 }};
 // Launch just ahead of the aircraft and never initialize below a plausible missile speed.
 constexpr float launchOffsetFeet = 35.0f;
-constexpr float minimumLaunchSpeedKnots = 300.0f;
+constexpr float minimumLaunchSpeedKnots = 450.0f;
 }
 
 // Resolve a known weapon profile; unsupported IDs are rejected by launch/tick.

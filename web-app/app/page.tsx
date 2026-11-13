@@ -95,6 +95,8 @@ const DEFAULT_LATITUDE = 51.5000;
 const DEFAULT_LONGITUDE = -2.5833;
 
 const MAX_RADAR_TARGETS = 64;
+const TELEMETRY_SEND_INTERVAL_SECONDS = 0.05;
+const MAX_TELEMETRY_BUFFERED_BYTES = 16 * 1024;
 
 // Generates a UUID without requiring a secure context. crypto.randomUUID() is
 // restricted to secure contexts, but getRandomValues() is available on HTTP
@@ -538,7 +540,10 @@ export default function Home() {
       peerConnectionsRef.current.set(sessionId, connection);
       configurePeerConnection(connection, sessionId, 'host');
       configureDataChannel(
-        connection.createDataChannel('flight-telemetry', { ordered: false }),
+        connection.createDataChannel('flight-telemetry', {
+          ordered: false,
+          maxRetransmits: 0,
+        }),
         sessionId,
         'host',
       );
@@ -1035,12 +1040,15 @@ export default function Home() {
               );
             }
 
-            // Send local aircraft state to connected peers at 10 Hz.
+            // Frequent, disposable snapshots keep flight and missile state close to real time.
             telemetrySendElapsed += clampedDt;
             const openChannels = Array.from(dataChannelsRef.current.values())
               .filter(channel => channel.readyState === 'open');
-            if (telemetrySendElapsed >= 0.1 && openChannels.length > 0) {
-              telemetrySendElapsed %= 0.1;
+            if (
+              telemetrySendElapsed >= TELEMETRY_SEND_INTERVAL_SECONDS &&
+              openChannels.length > 0
+            ) {
+              telemetrySendElapsed %= TELEMETRY_SEND_INTERVAL_SECONDS;
               const aircraftCoordinates = getAircraftCoordinates(
                 terrainOrigin,
                 nextPosX,
@@ -1079,6 +1087,8 @@ export default function Home() {
               telemetrySequenceRef.current += 1;
               const message = JSON.stringify({ type: 'telemetry', telemetry });
               for (const channel of openChannels) {
+                // Skip stale snapshots rather than letting a congested channel build a queue.
+                if (channel.bufferedAmount > MAX_TELEMETRY_BUFFERED_BYTES) continue;
                 try {
                   channel.send(message);
                 } catch (error) {
