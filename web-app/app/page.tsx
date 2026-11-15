@@ -37,7 +37,12 @@ import {
   parseFlightTelemetryMessage,
   waitForIceGatheringComplete,
 } from './webrtc';
-import type { FlightTelemetry, MissileTelemetry } from './webrtc';
+import type {
+  FlightTelemetry,
+  MissileTelemetry,
+  ReceivedFlightTelemetry,
+} from './webrtc';
+import type { LocalPose } from './components/FlightViewport';
 
 interface SimEngineInstance {
   tick(dt: number): void;
@@ -113,6 +118,7 @@ const DEFAULT_LONGITUDE = -2.5833;
 
 const MAX_RADAR_TARGETS = 64;
 const TELEMETRY_SEND_INTERVAL_SECONDS = 1 / 30;
+const MAX_RECEIVED_TELEMETRY_SAMPLES = 64;
 const MAX_TELEMETRY_BUFFERED_BYTES = 16 * 1024;
 const REAL_WEATHER_POLL_INTERVAL_MS = 60 * 1000;
 const ADSB_API_KEY_SESSION_STORAGE_KEY = 'machweb.adsbApiKey';
@@ -374,6 +380,8 @@ export default function Home() {
   const telemetrySequenceRef = useRef(0);
   const remoteTelemetriesRef = useRef<FlightTelemetry[]>([]);
   const remoteTelemetryReceivedAtRef = useRef(new Map<string, number>());
+  const remoteTelemetrySamplesRef = useRef(new Map<string, ReceivedFlightTelemetry[]>());
+  const localPoseRef = useRef<LocalPose | null>(null);
   const radarTargetIdsRef = useRef(new Map<string, number>());
   const radarTargetPlayerIdsRef = useRef(new Map<number, string>());
   const radarTargetKindsRef = useRef(new Map<number, 'player' | 'adsb'>());
@@ -511,6 +519,7 @@ export default function Home() {
     peerConnectionsRef.current.clear();
     peerPlayersRef.current.clear();
     remoteTelemetryReceivedAtRef.current.clear();
+    remoteTelemetrySamplesRef.current.clear();
     radarTargetIdsRef.current.clear();
     radarTargetPlayerIdsRef.current.clear();
     radarTargetKindsRef.current.clear();
@@ -600,6 +609,7 @@ export default function Home() {
         playerIds.forEach(playerId => {
           delete next[playerId];
           remoteTelemetryReceivedAtRef.current.delete(playerId);
+          remoteTelemetrySamplesRef.current.delete(playerId);
         });
         return next;
       });
@@ -668,7 +678,15 @@ export default function Home() {
       }
       lastReceivedSequences.set(telemetry.playerId, telemetry.sequence);
       peerPlayersRef.current.get(sessionId)?.add(telemetry.playerId);
-      remoteTelemetryReceivedAtRef.current.set(telemetry.playerId, performance.now());
+      // Stamp arrival here, not when React renders, so interpolation sees real packet timing.
+      const receivedAt = performance.now();
+      remoteTelemetryReceivedAtRef.current.set(telemetry.playerId, receivedAt);
+      const receivedSamples = remoteTelemetrySamplesRef.current.get(telemetry.playerId) ?? [];
+      receivedSamples.push({ telemetry, receivedAt });
+      if (receivedSamples.length > MAX_RECEIVED_TELEMETRY_SAMPLES) {
+        receivedSamples.splice(0, receivedSamples.length - MAX_RECEIVED_TELEMETRY_SAMPLES);
+      }
+      remoteTelemetrySamplesRef.current.set(telemetry.playerId, receivedSamples);
       setRemoteTelemetryByPlayer(current => ({
         ...current,
         [telemetry.playerId]: telemetry,
@@ -1265,6 +1283,16 @@ export default function Home() {
               nextHeading,
               nextVerticalSpeed,
             ] = telemetry;
+            // Published synchronously so the renderer never waits on React to move the camera.
+            localPoseRef.current = {
+              timeMs: currentTime,
+              posX: nextPosX,
+              altitude: nextAltitude,
+              posZ: nextPosZ,
+              pitch: nextPitch,
+              roll: nextRoll,
+              heading: nextHeading,
+            };
             setPosX(nextPosX);
             setAltitude(nextAltitude);
             setPosZ(nextPosZ);
@@ -1390,6 +1418,7 @@ export default function Home() {
                 ...aircraftCoordinates,
                 sequence: telemetrySequenceRef.current,
                 simulationTimeMinutes: simulationTimeRef.current,
+                sampleTimeMs: currentTime,
                 radarDetectedPlayerIds,
                 missiles: readMissiles(),
               };
@@ -1691,9 +1720,11 @@ export default function Home() {
             airspeed={airspeed}
             crashed={crashed}
             localPlayerId={localPlayerId}
+            localPoseRef={localPoseRef}
             localMissilesRef={localMissilesRef}
             radarEnabled={radarEnabled}
             remoteTelemetries={remoteTelemetries}
+            remoteTelemetrySamplesRef={remoteTelemetrySamplesRef}
             radarContacts={radarContacts}
             radarWarnings={radarWarnings}
             radarScanAzimuth={radarScanAzimuth}

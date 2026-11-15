@@ -18,9 +18,16 @@ export interface FlightTelemetry {
   longitude: number;
   sequence: number;
   simulationTimeMinutes: number;
+  sampleTimeMs?: number; // Sender's performance.now() when this state was simulated.
   sourceAgeSeconds?: number;
   radarDetectedPlayerIds?: string[];
   missiles?: MissileTelemetry[];
+}
+
+// Telemetry paired with its local arrival time, which is unaffected by React batching.
+export interface ReceivedFlightTelemetry {
+  telemetry: FlightTelemetry;
+  receivedAt: number;
 }
 
 // Network-safe missile snapshot; exploded missiles retain impactPlayerId for crash reporting.
@@ -192,6 +199,10 @@ function isFlightTelemetry(value: unknown): value is FlightTelemetry {
         Number.isFinite(value.sourceAgeSeconds) &&
         value.sourceAgeSeconds >= 0 &&
         value.sourceAgeSeconds <= 60)) &&
+    (value.sampleTimeMs === undefined ||
+      (typeof value.sampleTimeMs === 'number' &&
+        Number.isFinite(value.sampleTimeMs) &&
+        value.sampleTimeMs >= 0)) &&
     typeof value.crashed === 'boolean' &&
     (value.radarDetectedPlayerIds === undefined ||
       (Array.isArray(value.radarDetectedPlayerIds) &&

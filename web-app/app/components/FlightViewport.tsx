@@ -6,12 +6,27 @@ import * as THREE from 'three';
 import { getAircraftCoordinates, getLocalPosition, getSatelliteTileUrl } from '../terrain';
 import type { TerrainGrid, TerrainOrigin } from '../terrain';
 import { ADSB_POLL_INTERVAL_MS, ADSB_TRACK_TTL_MS } from '../adsb';
-import type { FlightTelemetry, MissileTelemetry } from '../webrtc';
+import type {
+  FlightTelemetry,
+  MissileTelemetry,
+  ReceivedFlightTelemetry,
+} from '../webrtc';
 import type { WeatherState } from '../weather';
 import RadarScope from './RadarScope';
 import type { RadarContact } from './RadarScope';
 import RadarWarningReceiver from './RadarWarningReceiver';
 import type { RadarWarningContact } from './RadarWarningReceiver';
+
+// Latest simulator state, published by the sim loop so the camera never waits on React.
+export interface LocalPose {
+  timeMs: number; // Frame time of the sim tick that produced this pose.
+  posX: number;
+  altitude: number;
+  posZ: number;
+  pitch: number;
+  roll: number;
+  heading: number;
+}
 
 interface FlightViewportProps {
   posX: number;
@@ -25,9 +40,11 @@ interface FlightViewportProps {
   airspeed: number;
   crashed: boolean;
   localPlayerId: string;
+  localPoseRef: RefObject<LocalPose | null>;
   localMissilesRef: RefObject<MissileTelemetry[]>;
   radarEnabled: boolean;
   remoteTelemetries: FlightTelemetry[];
+  remoteTelemetrySamplesRef: RefObject<Map<string, ReceivedFlightTelemetry[]>>;
   radarContacts: RadarContact[];
   radarWarnings: RadarWarningContact[];
   radarScanAzimuth: number;
@@ -42,6 +59,7 @@ interface FlightViewportProps {
 
 interface RemoteAircraftSample {
   receivedAt: number;
+  timelineAt: number; // Sample time mapped onto the local clock.
   telemetry: FlightTelemetry;
   posXFeet: number;
   posZFeet: number;
@@ -52,8 +70,12 @@ interface RemoteAircraftInstance {
   lights: THREE.Group;
   samples: RemoteAircraftSample[];
   lastSequence: number;
-  lastArrivalIntervalMs: number | null;
-  interarrivalJitterMs: number;
+  clockOffsetMs: number | null; // Local arrival time minus sender sample time, minimum-filtered.
+  offsetWindow: number[];
+  sendIntervalMs: number;
+  queuePeakMs: number; // Recent network queuing delay above the fastest observed packets.
+  delayMs: number;
+  lastRenderTime: number | null;
 }
 
 interface ExplosionEffect {
@@ -101,8 +123,14 @@ const BOEING_767_DIMENSIONS: AircraftDimensionsFeet = {
   wingspanFeet: 156,
   heightFeet: 52,
 };
-const REMOTE_INTERPOLATION_BASE_DELAY_MS = 120;
-const REMOTE_INTERPOLATION_MAX_DELAY_MS = 250;
+const REMOTE_MIN_DELAY_MS = 60;
+const REMOTE_MAX_DELAY_MS = 300;
+const REMOTE_DELAY_MARGIN_MS = 15;
+const REMOTE_DELAY_GROW_RATE = 0.25;
+const REMOTE_DELAY_SHRINK_RATE = 0.05;
+const REMOTE_QUEUE_PEAK_DECAY_MS_PER_SECOND = 30;
+const REMOTE_CLOCK_WINDOW_SAMPLES = 150;
+const MAX_REMOTE_EXTRAPOLATION_MS = 120;
 const ADSB_INTERPOLATION_DELAY_MS = ADSB_POLL_INTERVAL_MS * 1.25;
 const ADSB_VISUAL_SMOOTHING_SECONDS = 0.35;
 const REMOTE_MISSILE_INTERPOLATION_DELAY_MS = 50;
@@ -416,6 +444,64 @@ function interpolateAngle(start: number, end: number, amount: number): number {
 function smoothAngle(current: number, target: number, amount: number): number {
   const delta = Math.atan2(Math.sin(target - current), Math.cos(target - current));
   return current + delta * amount;
+}
+
+// Adds one received player snapshot to an aircraft's timeline, using sender sample times so
+// that bursty or late packet arrival does not distort the spacing between samples.
+function ingestRemoteSample(
+  instance: RemoteAircraftInstance,
+  received: ReceivedFlightTelemetry,
+  origin: TerrainOrigin,
+): void {
+  const { telemetry, receivedAt } = received;
+  const previous = instance.samples[instance.samples.length - 1];
+  let timelineAt = receivedAt;
+
+  if (typeof telemetry.sampleTimeMs === 'number') {
+    const observedOffset = receivedAt - telemetry.sampleTimeMs;
+    const window = instance.offsetWindow;
+    window.push(observedOffset);
+    if (window.length > REMOTE_CLOCK_WINDOW_SAMPLES) window.shift();
+    let fastestOffset = observedOffset;
+    for (const offset of window) if (offset < fastestOffset) fastestOffset = offset;
+
+    // The fastest recent packets approximate zero queuing; follow them slowly to avoid shifts.
+    if (instance.clockOffsetMs === null) {
+      instance.clockOffsetMs = fastestOffset;
+    } else {
+      const gap = fastestOffset - instance.clockOffsetMs;
+      instance.clockOffsetMs += gap < 0
+        ? Math.max(gap * 0.1, -2)
+        : Math.min(gap * 0.02, 0.25);
+    }
+    timelineAt = telemetry.sampleTimeMs + instance.clockOffsetMs;
+    instance.queuePeakMs = Math.max(
+      instance.queuePeakMs,
+      Math.max(0, observedOffset - instance.clockOffsetMs),
+    );
+  } else {
+    // Peers without sender timestamps only offer arrival times; assume moderate jitter.
+    instance.queuePeakMs = Math.max(instance.queuePeakMs, 60);
+  }
+
+  if (previous) {
+    if (timelineAt <= previous.timelineAt) timelineAt = previous.timelineAt + 1;
+    const spacing = timelineAt - previous.timelineAt;
+    instance.sendIntervalMs += (THREE.MathUtils.clamp(spacing, 10, 200) - instance.sendIntervalMs) * 0.1;
+  }
+
+  const localPosition = getLocalPosition(origin, telemetry);
+  instance.samples.push({
+    receivedAt,
+    timelineAt,
+    telemetry,
+    posXFeet: localPosition.posXFeet,
+    posZFeet: localPosition.posZFeet,
+  });
+  instance.lastSequence = telemetry.sequence;
+  if (instance.samples.length > MAX_REMOTE_SAMPLES) {
+    instance.samples.splice(0, instance.samples.length - MAX_REMOTE_SAMPLES);
+  }
 }
 
 // Estimates the sun's elevation and azimuth for local time and position.
@@ -783,9 +869,11 @@ export default function FlightViewport({
   airspeed,
   crashed,
   localPlayerId,
+  localPoseRef,
   localMissilesRef,
   radarEnabled,
   remoteTelemetries,
+  remoteTelemetrySamplesRef,
   radarContacts,
   radarWarnings,
   radarScanAzimuth,
@@ -1063,10 +1151,23 @@ export default function FlightViewport({
     let previousFrameTime = performance.now();
     const adsbTargetPosition = new THREE.Vector3();
     // Interpolates remote traffic and updates time-dependent lighting each frame.
-    const animate = () => {
+    const animate = (frameTime?: number) => {
       animId = requestAnimationFrame(animate);
+      // The vsync-aligned frame time is steadier than performance.now() inside the callback.
+      const now = frameTime ?? performance.now();
+      const pose = localPoseRef.current;
+      if (pose) {
+        camera.position.set(
+          pose.posX * visualScale,
+          pose.altitude * visualScale,
+          pose.posZ * visualScale,
+        );
+        camera.rotation.order = 'YXZ';
+        camera.rotation.y = -THREE.MathUtils.degToRad(pose.heading);
+        camera.rotation.x = THREE.MathUtils.degToRad(pose.pitch);
+        camera.rotation.z = -THREE.MathUtils.degToRad(pose.roll);
+      }
       const timeMinutes = simulationTimeRef.current;
-      const now = performance.now();
       const frameSeconds = Math.min(Math.max((now - previousFrameTime) / 1000, 0), 0.1);
       previousFrameTime = now;
       const currentWeather = weatherRef.current;
@@ -1192,20 +1293,47 @@ export default function FlightViewport({
         -frameSeconds / ADSB_VISUAL_SMOOTHING_SECONDS,
       );
       const missileRenderTime = now - REMOTE_MISSILE_INTERPOLATION_DELAY_MS;
+      for (const [playerId, receivedSamples] of remoteTelemetrySamplesRef.current) {
+        if (receivedSamples.length === 0) continue;
+        const instance = remoteAircrafts.get(playerId);
+        if (!instance) continue;
+        for (const received of receivedSamples) {
+          if (received.telemetry.sequence <= instance.lastSequence) continue;
+          ingestRemoteSample(instance, received, terrainOriginRef.current);
+        }
+        receivedSamples.length = 0;
+      }
       for (const instance of remoteAircrafts.values()) {
         const { aircraft, lights, samples } = instance;
         const isAdsb = samples[0]?.telemetry.playerId.startsWith('adsb:') ?? false;
-        const interpolationDelay = isAdsb
-          ? ADSB_INTERPOLATION_DELAY_MS
-          : THREE.MathUtils.clamp(
-              REMOTE_INTERPOLATION_BASE_DELAY_MS + instance.interarrivalJitterMs * 2,
-              REMOTE_INTERPOLATION_BASE_DELAY_MS,
-              REMOTE_INTERPOLATION_MAX_DELAY_MS,
-            );
-        const renderTime = now - interpolationDelay;
+        let renderTime = now - ADSB_INTERPOLATION_DELAY_MS;
+        if (!isAdsb) {
+          // Hold back by one packet interval plus recent queuing so a sample is already
+          // buffered ahead of the playhead; change it slowly so playback speed stays steady.
+          instance.queuePeakMs = Math.max(
+            0,
+            instance.queuePeakMs - REMOTE_QUEUE_PEAK_DECAY_MS_PER_SECOND * frameSeconds,
+          );
+          const targetDelay = THREE.MathUtils.clamp(
+            instance.sendIntervalMs + instance.queuePeakMs + REMOTE_DELAY_MARGIN_MS,
+            REMOTE_MIN_DELAY_MS,
+            REMOTE_MAX_DELAY_MS,
+          );
+          const frameMs = frameSeconds * 1000;
+          instance.delayMs += THREE.MathUtils.clamp(
+            targetDelay - instance.delayMs,
+            -REMOTE_DELAY_SHRINK_RATE * frameMs,
+            REMOTE_DELAY_GROW_RATE * frameMs,
+          );
+          const targetRenderTime = (pose?.timeMs ?? now) - instance.delayMs;
+          renderTime = instance.lastRenderTime === null
+            ? targetRenderTime
+            : Math.max(instance.lastRenderTime, targetRenderTime);
+          instance.lastRenderTime = renderTime;
+        }
         const isNight = timeMinutes >= 18 * 60 || timeMinutes < 6 * 60;
         lights.visible = isNight;
-        while (samples.length > 2 && samples[1].receivedAt <= renderTime) samples.shift();
+        while (samples.length > 2 && samples[1].timelineAt <= renderTime) samples.shift();
 
         if (samples.length === 0) {
           aircraft.visible = false;
@@ -1220,14 +1348,15 @@ export default function FlightViewport({
         }
         const first = samples[0];
         const second = samples[1];
-        const interval = second ? second.receivedAt - first.receivedAt : 0;
-        const amount = interval > 0
-          ? THREE.MathUtils.clamp(
-              (renderTime - first.receivedAt) / interval,
-              0,
-              1,
-            )
+        const interval = second ? second.timelineAt - first.timelineAt : 0;
+        const rawAmount = interval > 0
+          ? (renderTime - first.timelineAt) / interval
           : 0;
+        // Player aircraft briefly dead-reckon past the newest sample when packets run late.
+        const maxAmount = isAdsb || interval <= 0
+          ? 1
+          : 1 + MAX_REMOTE_EXTRAPOLATION_MS / interval;
+        const amount = THREE.MathUtils.clamp(rawAmount, 0, maxAmount);
         const start = first.telemetry;
         const end = second?.telemetry ?? start;
         const targetHeading = -THREE.MathUtils.degToRad(
@@ -1574,7 +1703,7 @@ export default function FlightViewport({
       seenExplosions.clear();
       terrainMeshesRef.current = [];
     };
-  }, [localMissilesRef, localPlayerIdRef]);
+  }, [localMissilesRef, localPlayerIdRef, localPoseRef, remoteTelemetrySamplesRef]);
 
   // Keeps the displayed simulation time available to the render loop.
   useEffect(() => {
@@ -1853,9 +1982,9 @@ export default function FlightViewport({
     }
 
     for (const telemetry of remoteTelemetries) {
+      const isAdsb = telemetry.playerId.startsWith('adsb:');
       let instance = remoteAircraftRef.current.get(telemetry.playerId);
       if (!instance) {
-        const isAdsb = telemetry.playerId.startsWith('adsb:');
         const color = isAdsb
           ? 0x38bdf8
           : getPlayerAircraftColor(telemetry.playerId);
@@ -1866,37 +1995,22 @@ export default function FlightViewport({
           ...model,
           samples: [],
           lastSequence: -1,
-          lastArrivalIntervalMs: null,
-          interarrivalJitterMs: 0,
+          clockOffsetMs: null,
+          offsetWindow: [],
+          sendIntervalMs: 1000 / 30,
+          queuePeakMs: 0,
+          delayMs: 100,
+          lastRenderTime: null,
         };
         remoteAircraftRef.current.set(telemetry.playerId, instance);
       }
-      if (telemetry.sequence <= instance.lastSequence) continue;
-
-      const localPosition = getLocalPosition(terrainOrigin, telemetry);
-      const receivedAt = performance.now();
-      const previousSample = instance.samples[instance.samples.length - 1];
-      if (previousSample) {
-        const arrivalIntervalMs = receivedAt - previousSample.receivedAt;
-        if (instance.lastArrivalIntervalMs !== null) {
-          const intervalVariation = Math.abs(
-            arrivalIntervalMs - instance.lastArrivalIntervalMs,
-          );
-          instance.interarrivalJitterMs +=
-            (intervalVariation - instance.interarrivalJitterMs) * 0.25;
-        }
-        instance.lastArrivalIntervalMs = arrivalIntervalMs;
-      }
-      instance.samples.push({
-        receivedAt,
-        telemetry,
-        posXFeet: localPosition.posXFeet,
-        posZFeet: localPosition.posZFeet,
-      });
-      instance.lastSequence = telemetry.sequence;
-      if (instance.samples.length > MAX_REMOTE_SAMPLES) {
-        instance.samples.splice(0, instance.samples.length - MAX_REMOTE_SAMPLES);
-      }
+      // Player snapshots arrive through remoteTelemetrySamplesRef; only ADS-B tracks use state.
+      if (!isAdsb || telemetry.sequence <= instance.lastSequence) continue;
+      ingestRemoteSample(
+        instance,
+        { telemetry, receivedAt: performance.now() },
+        terrainOrigin,
+      );
     }
   }, [remoteTelemetries, terrainOrigin]);
 
