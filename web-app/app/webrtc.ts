@@ -16,6 +16,7 @@ export interface FlightTelemetry {
   longitude: number;
   sequence: number;
   simulationTimeMinutes: number;
+  sourceAgeSeconds?: number;
   radarDetectedPlayerIds?: string[];
   missiles?: MissileTelemetry[];
 }
@@ -179,6 +180,11 @@ function isFlightTelemetry(value: unknown): value is FlightTelemetry {
     typeof value.sequence === 'number' &&
     Number.isSafeInteger(value.sequence) &&
     value.sequence >= 0 &&
+    (value.sourceAgeSeconds === undefined ||
+      (typeof value.sourceAgeSeconds === 'number' &&
+        Number.isFinite(value.sourceAgeSeconds) &&
+        value.sourceAgeSeconds >= 0 &&
+        value.sourceAgeSeconds <= 60)) &&
     typeof value.crashed === 'boolean' &&
     (value.radarDetectedPlayerIds === undefined ||
       (Array.isArray(value.radarDetectedPlayerIds) &&

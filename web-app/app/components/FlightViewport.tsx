@@ -5,6 +5,7 @@ import type { RefObject } from 'react';
 import * as THREE from 'three';
 import { getAircraftCoordinates, getLocalPosition, getSatelliteTileUrl } from '../terrain';
 import type { TerrainGrid, TerrainOrigin } from '../terrain';
+import { ADSB_POLL_INTERVAL_MS, ADSB_TRACK_TTL_MS } from '../adsb';
 import type { FlightTelemetry, MissileTelemetry } from '../webrtc';
 import RadarScope from './RadarScope';
 import type { RadarContact } from './RadarScope';
@@ -30,11 +31,10 @@ interface FlightViewportProps {
   radarWarnings: RadarWarningContact[];
   radarScanAzimuth: number;
   radarScanBar: number;
+  primaryTargetId: number | null;
   terrainOrigin: TerrainOrigin;
   terrainGrid: TerrainGrid | null;
   terrainStatus: string;
-  status: string;
-  multiplayerStatus: string;
   simulationTimeMinutes: number;
 }
 
@@ -73,9 +73,33 @@ interface MissileVisualInstance {
   locallySimulated: boolean;
 }
 
+interface AircraftDimensionsFeet {
+  lengthFeet: number;
+  wingspanFeet: number;
+  heightFeet: number;
+}
+
 const visualScale = 0.01;
 const feetPerMeter = 3.28084;
+// Approximate extents of the shared mesh before applying aircraft-specific dimensions.
+const REMOTE_AIRCRAFT_BASE_DIMENSIONS: AircraftDimensionsFeet = {
+  lengthFeet: 100,
+  wingspanFeet: 97,
+  heightFeet: 14,
+};
+const TORNADO_DIMENSIONS: AircraftDimensionsFeet = {
+  lengthFeet: 55,
+  wingspanFeet: 46,
+  heightFeet: 20,
+};
+const BOEING_767_DIMENSIONS: AircraftDimensionsFeet = {
+  lengthFeet: 180,
+  wingspanFeet: 156,
+  heightFeet: 52,
+};
 const REMOTE_INTERPOLATION_DELAY_MS = 150;
+const ADSB_INTERPOLATION_DELAY_MS = ADSB_POLL_INTERVAL_MS * 1.25;
+const ADSB_VISUAL_SMOOTHING_SECONDS = 0.35;
 const REMOTE_MISSILE_INTERPOLATION_DELAY_MS = 50;
 const MAX_MISSILE_EXTRAPOLATION_MS = 200;
 const MISSILE_VISUAL_SMOOTHING_SECONDS = 0.035;
@@ -202,63 +226,156 @@ function getSolarPosition(
   return { elevation, azimuth };
 }
 
-// Builds a lightweight remote-aircraft model and its navigation lights.
-function createRemoteAircraft(color: number): { aircraft: THREE.Group; lights: THREE.Group } {
+// Builds a lightweight remote-aircraft model scaled to the requested reference dimensions.
+function createRemoteAircraft(
+  color: number,
+  dimensions: AircraftDimensionsFeet,
+  kind: 'fighter' | 'airliner',
+): { aircraft: THREE.Group; lights: THREE.Group } {
   const aircraft = new THREE.Group();
+  aircraft.scale.set(
+    dimensions.wingspanFeet / REMOTE_AIRCRAFT_BASE_DIMENSIONS.wingspanFeet,
+    dimensions.heightFeet / REMOTE_AIRCRAFT_BASE_DIMENSIONS.heightFeet,
+    dimensions.lengthFeet / REMOTE_AIRCRAFT_BASE_DIMENSIONS.lengthFeet,
+  );
   const lights = new THREE.Group();
   const aircraftMaterial = new THREE.MeshLambertMaterial({ color });
   const cockpitMaterial = new THREE.MeshLambertMaterial({ color: 0xe0f2fe });
-  const fuselage = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.018, 0.032, 0.82, 10),
-    aircraftMaterial,
-  );
-  fuselage.rotation.x = Math.PI / 2;
-  fuselage.castShadow = true;
-  aircraft.add(fuselage);
+  if (kind === 'airliner') {
+    const fuselage = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.05, 0.72, 14),
+      aircraftMaterial,
+    );
+    fuselage.rotation.x = Math.PI / 2;
+    fuselage.scale.z = 0.45;
+    fuselage.castShadow = true;
+    aircraft.add(fuselage);
 
-  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.022, 0.16, 10), aircraftMaterial);
-  nose.rotation.x = -Math.PI / 2;
-  nose.position.z = -0.48;
-  nose.castShadow = true;
-  aircraft.add(nose);
+    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.18, 12), aircraftMaterial);
+    nose.rotation.x = -Math.PI / 2;
+    nose.scale.z = 0.45;
+    nose.position.z = -0.41;
+    nose.castShadow = true;
+    aircraft.add(nose);
 
-  const wings = new THREE.Mesh(new THREE.BoxGeometry(0.88, 0.018, 0.14), aircraftMaterial);
-  wings.position.z = -0.04;
-  wings.castShadow = true;
-  aircraft.add(wings);
+    const rearFuselage = new THREE.Mesh(
+      new THREE.ConeGeometry(0.05, 0.2, 12),
+      aircraftMaterial,
+    );
+    rearFuselage.rotation.x = Math.PI / 2;
+    rearFuselage.scale.z = 0.45;
+    rearFuselage.position.z = 0.41;
+    rearFuselage.castShadow = true;
+    aircraft.add(rearFuselage);
 
-  const tailplane = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.014, 0.08), aircraftMaterial);
-  tailplane.position.z = 0.34;
-  tailplane.castShadow = true;
-  aircraft.add(tailplane);
+    const wingShape = new THREE.Shape();
+    wingShape.moveTo(-0.055, 0.08);
+    wingShape.lineTo(0.055, 0.08);
+    wingShape.lineTo(0.485, -0.1);
+    wingShape.lineTo(0.465, -0.31);
+    wingShape.lineTo(0.075, -0.12);
+    wingShape.lineTo(-0.075, -0.12);
+    wingShape.lineTo(-0.465, -0.31);
+    wingShape.lineTo(-0.485, -0.1);
+    wingShape.closePath();
+    const wings = new THREE.Mesh(new THREE.ShapeGeometry(wingShape), aircraftMaterial);
+    wings.rotation.x = -Math.PI / 2;
+    wings.position.y = -0.005;
+    wings.castShadow = true;
+    aircraft.add(wings);
 
-  const fin = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.1, 0.12), aircraftMaterial);
-  fin.position.set(0, 0.055, 0.32);
-  fin.castShadow = true;
-  aircraft.add(fin);
+    const engineMaterial = new THREE.MeshLambertMaterial({ color: 0x64748b });
+    for (const side of [-1, 1]) {
+      const engine = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.025, 0.025, 0.18, 12),
+        engineMaterial,
+      );
+      engine.rotation.x = Math.PI / 2;
+      engine.scale.z = 0.5;
+      engine.position.set(side * 0.23, -0.035, 0.12);
+      engine.castShadow = true;
+      aircraft.add(engine);
 
-  const cockpit = new THREE.Mesh(
-    new THREE.SphereGeometry(0.035, 10, 8),
-    cockpitMaterial,
-  );
-  cockpit.scale.set(0.85, 0.65, 1.7);
-  cockpit.position.set(0, 0.028, -0.13);
-  aircraft.add(cockpit);
+      const pylon = new THREE.Mesh(
+        new THREE.BoxGeometry(0.025, 0.035, 0.08),
+        aircraftMaterial,
+      );
+      pylon.position.set(side * 0.23, -0.015, 0.08);
+      aircraft.add(pylon);
+    }
+
+    const tailplane = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.012, 0.09), aircraftMaterial);
+    tailplane.position.z = 0.32;
+    tailplane.castShadow = true;
+    aircraft.add(tailplane);
+
+    const fin = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.12, 0.14), aircraftMaterial);
+    fin.position.set(0, 0.0575, 0.34);
+    fin.castShadow = true;
+    aircraft.add(fin);
+
+    const cockpit = new THREE.Mesh(
+      new THREE.SphereGeometry(0.03, 12, 8),
+      cockpitMaterial,
+    );
+    cockpit.scale.set(0.75, 0.45, 1.6);
+    cockpit.position.set(0, 0.03, -0.34);
+    aircraft.add(cockpit);
+  } else {
+    const fuselage = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.018, 0.032, 0.82, 10),
+      aircraftMaterial,
+    );
+    fuselage.rotation.x = Math.PI / 2;
+    fuselage.castShadow = true;
+    aircraft.add(fuselage);
+
+    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.022, 0.16, 10), aircraftMaterial);
+    nose.rotation.x = -Math.PI / 2;
+    nose.position.z = -0.48;
+    nose.castShadow = true;
+    aircraft.add(nose);
+
+    const wings = new THREE.Mesh(new THREE.BoxGeometry(0.88, 0.018, 0.14), aircraftMaterial);
+    wings.position.z = -0.04;
+    wings.castShadow = true;
+    aircraft.add(wings);
+
+    const tailplane = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.014, 0.08), aircraftMaterial);
+    tailplane.position.z = 0.34;
+    tailplane.castShadow = true;
+    aircraft.add(tailplane);
+
+    const fin = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.1, 0.12), aircraftMaterial);
+    fin.position.set(0, 0.055, 0.32);
+    fin.castShadow = true;
+    aircraft.add(fin);
+
+    const cockpit = new THREE.Mesh(
+      new THREE.SphereGeometry(0.035, 10, 8),
+      cockpitMaterial,
+    );
+    cockpit.scale.set(0.85, 0.65, 1.7);
+    cockpit.position.set(0, 0.028, -0.13);
+    aircraft.add(cockpit);
+  }
 
   const addAircraftLight = (x: number, y: number, z: number, color: number) => {
     const lightGroup = new THREE.Group();
     lightGroup.position.set(x, y, z);
-    lightGroup.add(new THREE.PointLight(color, 3, 45, 2));
+    lightGroup.add(new THREE.PointLight(color, 4, 45, 2));
     lightGroup.add(new THREE.Mesh(
-      new THREE.SphereGeometry(0.025, 8, 6),
+      new THREE.SphereGeometry(0.045, 8, 6),
       new THREE.MeshBasicMaterial({ color, toneMapped: false }),
     ));
     lights.add(lightGroup);
   };
 
-  addAircraftLight(-0.44, 0, -0.04, 0xff3030);
-  addAircraftLight(0.44, 0, -0.04, 0x22ff77);
-  addAircraftLight(0, 0.02, 0.4, 0xffffff);
+  const lightWingtip = kind === 'airliner' ? 0.485 : 0.44;
+  const lightTail = kind === 'airliner' ? 0.46 : 0.4;
+  addAircraftLight(-lightWingtip, 0, kind === 'airliner' ? 0.1 : -0.04, 0xff3030);
+  addAircraftLight(lightWingtip, 0, kind === 'airliner' ? 0.1 : -0.04, 0x22ff77);
+  addAircraftLight(0, 0.02, lightTail, 0xffffff);
   lights.visible = false;
   aircraft.add(lights);
   aircraft.visible = false;
@@ -405,11 +522,10 @@ export default function FlightViewport({
   radarWarnings,
   radarScanAzimuth,
   radarScanBar,
+  primaryTargetId,
   terrainOrigin,
   terrainGrid,
   terrainStatus,
-  status,
-  multiplayerStatus,
   simulationTimeMinutes,
 }: FlightViewportProps) {
   const mountRef = useRef<HTMLDivElement>(null);
@@ -543,6 +659,7 @@ export default function FlightViewport({
 
     let animId: number;
     let previousFrameTime = performance.now();
+    const adsbTargetPosition = new THREE.Vector3();
     // Interpolates remote traffic and updates time-dependent lighting each frame.
     const animate = () => {
       animId = requestAnimationFrame(animate);
@@ -553,44 +670,84 @@ export default function FlightViewport({
       const missileSmoothing = 1 - Math.exp(
         -frameSeconds / MISSILE_VISUAL_SMOOTHING_SECONDS,
       );
-      const renderTime = now - REMOTE_INTERPOLATION_DELAY_MS;
+      const adsbSmoothing = 1 - Math.exp(
+        -frameSeconds / ADSB_VISUAL_SMOOTHING_SECONDS,
+      );
       const missileRenderTime = now - REMOTE_MISSILE_INTERPOLATION_DELAY_MS;
       for (const instance of remoteAircrafts.values()) {
         const { aircraft, lights, samples } = instance;
-        lights.visible = timeMinutes >= 18 * 60 || timeMinutes < 6 * 60;
+        const isAdsb = samples[0]?.telemetry.playerId.startsWith('adsb:') ?? false;
+        const renderTime = now - (
+          isAdsb ? ADSB_INTERPOLATION_DELAY_MS : REMOTE_INTERPOLATION_DELAY_MS
+        );
+        const isNight = timeMinutes >= 18 * 60 || timeMinutes < 6 * 60;
+        lights.visible = isNight;
         while (samples.length > 2 && samples[1].receivedAt <= renderTime) samples.shift();
 
-        if (samples.length === 0 || performance.now() - samples[samples.length - 1].receivedAt > 2_000) {
+        if (samples.length === 0) {
+          aircraft.visible = false;
+          continue;
+        }
+        const latestSample = samples[samples.length - 1];
+        if (now - latestSample.receivedAt +
+          (isAdsb ? (latestSample.telemetry.sourceAgeSeconds ?? 0) * 1000 : 0) >
+          (isAdsb ? ADSB_TRACK_TTL_MS : 2_000)) {
           aircraft.visible = false;
           continue;
         }
         const first = samples[0];
         const second = samples[1];
-        const amount = second
+        const interval = second ? second.receivedAt - first.receivedAt : 0;
+        const amount = interval > 0
           ? THREE.MathUtils.clamp(
-              (renderTime - first.receivedAt) / (second.receivedAt - first.receivedAt),
+              (renderTime - first.receivedAt) / interval,
               0,
               1,
             )
           : 0;
         const start = first.telemetry;
         const end = second?.telemetry ?? start;
-        aircraft.visible = true;
-        aircraft.position.set(
-          THREE.MathUtils.lerp(first.posXFeet, second?.posXFeet ?? first.posXFeet, amount) * visualScale,
-          THREE.MathUtils.lerp(start.altitude, end.altitude, amount) * visualScale,
-          THREE.MathUtils.lerp(first.posZFeet, second?.posZFeet ?? first.posZFeet, amount) * visualScale,
-        );
-        aircraft.rotation.order = 'YXZ';
-        aircraft.rotation.y = -THREE.MathUtils.degToRad(
+        const targetHeading = -THREE.MathUtils.degToRad(
           interpolateAngle(start.heading, end.heading, amount),
         );
-        aircraft.rotation.x = THREE.MathUtils.degToRad(
+        const targetPitch = THREE.MathUtils.degToRad(
           THREE.MathUtils.lerp(start.pitch, end.pitch, amount),
         );
-        aircraft.rotation.z = -THREE.MathUtils.degToRad(
+        const targetRoll = -THREE.MathUtils.degToRad(
           interpolateAngle(start.roll, end.roll, amount),
         );
+        aircraft.visible = true;
+        adsbTargetPosition.set(
+          THREE.MathUtils.lerp(first.posXFeet, second?.posXFeet ?? first.posXFeet, amount) *
+            visualScale,
+          THREE.MathUtils.lerp(start.altitude, end.altitude, amount) * visualScale,
+          THREE.MathUtils.lerp(
+            first.posZFeet,
+            second?.posZFeet ?? first.posZFeet,
+            amount,
+          ) * visualScale,
+        );
+        if (isAdsb) {
+          if (aircraft.userData.adsbPositionInitialized !== true) {
+            aircraft.position.copy(adsbTargetPosition);
+            aircraft.userData.adsbPositionInitialized = true;
+          } else {
+            aircraft.position.lerp(adsbTargetPosition, adsbSmoothing);
+          }
+          aircraft.rotation.y = smoothAngle(aircraft.rotation.y, targetHeading, adsbSmoothing);
+          aircraft.rotation.x = THREE.MathUtils.lerp(
+            aircraft.rotation.x,
+            targetPitch,
+            adsbSmoothing,
+          );
+          aircraft.rotation.z = smoothAngle(aircraft.rotation.z, targetRoll, adsbSmoothing);
+        } else {
+          aircraft.position.copy(adsbTargetPosition);
+          aircraft.rotation.y = targetHeading;
+          aircraft.rotation.x = targetPitch;
+          aircraft.rotation.z = targetRoll;
+        }
+        aircraft.rotation.order = 'YXZ';
       }
 
       for (const [key, missile] of missileInstances) {
@@ -1123,7 +1280,12 @@ export default function FlightViewport({
     for (const telemetry of remoteTelemetries) {
       let instance = remoteAircraftRef.current.get(telemetry.playerId);
       if (!instance) {
-        const model = createRemoteAircraft(getPlayerAircraftColor(telemetry.playerId));
+        const isAdsb = telemetry.playerId.startsWith('adsb:');
+        const color = isAdsb
+          ? 0x38bdf8
+          : getPlayerAircraftColor(telemetry.playerId);
+        const dimensions = isAdsb ? BOEING_767_DIMENSIONS : TORNADO_DIMENSIONS;
+        const model = createRemoteAircraft(color, dimensions, isAdsb ? 'airliner' : 'fighter');
         scene.add(model.aircraft);
         instance = {
           ...model,
@@ -1244,6 +1406,7 @@ export default function FlightViewport({
               contacts={radarContacts}
               scanAzimuth={radarScanAzimuth}
               scanBar={radarScanBar}
+              primaryTargetId={primaryTargetId}
             />
           )}
           {radarWarnings.length > 0 && <RadarWarningReceiver contacts={radarWarnings} />}
@@ -1257,16 +1420,6 @@ export default function FlightViewport({
         <span className="rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 text-emerald-300">
           MACHWEB
         </span>
-        {status && (
-          <span className="max-w-full break-words rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 text-zinc-300">
-            {status}
-          </span>
-        )}
-        {multiplayerStatus && (
-          <span className="max-w-full break-words rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 text-emerald-300">
-            {multiplayerStatus}
-          </span>
-        )}
         {resourceErrors.map(error => (
           <span
             key={error}

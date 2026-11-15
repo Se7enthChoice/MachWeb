@@ -56,9 +56,10 @@ public:
     bool addMissileTarget(unsigned int id, float posX, float altitude, float posZ) {
         return missiles.addAircraftTarget(id, posX, altitude, posZ);
     }
-    int launchMissile(unsigned int typeId) {
+    int launchMissile(unsigned int typeId, unsigned int selectedTargetId) {
         return missiles.launch(
             typeId,
+            selectedTargetId,
             aircraft.getPosX(),
             aircraft.getAltitude(),
             aircraft.getPosZ(),

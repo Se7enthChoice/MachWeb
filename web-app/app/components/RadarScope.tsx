@@ -11,6 +11,14 @@ export interface RadarContact {
   elevation: number;
   // A stale return fades while the antenna scans other bars and bearings.
   ageSeconds: number;
+  kind?: 'player' | 'adsb';
+}
+
+export function sortRadarContactsByRange(contacts: RadarContact[]): RadarContact[] {
+  return [...contacts].sort(
+    (first, second) =>
+      first.rangeNm - second.rangeNm || first.targetId - second.targetId,
+  );
 }
 
 // Scan state is supplied by the simulation; only range scaling is local display state.
@@ -18,6 +26,7 @@ interface RadarScopeProps {
   contacts: RadarContact[];
   scanAzimuth: number;
   scanBar: number;
+  primaryTargetId: number | null;
 }
 
 // The scope uses a fixed SVG coordinate system and scales only range display.
@@ -42,7 +51,12 @@ function getContactPosition(
   };
 }
 
-export default function RadarScope({ contacts, scanAzimuth, scanBar }: RadarScopeProps) {
+export default function RadarScope({
+  contacts,
+  scanAzimuth,
+  scanBar,
+  primaryTargetId,
+}: RadarScopeProps) {
   const [maxRangeNm, setMaxRangeNm] = useState(initialRangeNm);
 
   // Capture the scope shortcuts before the flight controls handle the same key event.
@@ -73,6 +87,12 @@ export default function RadarScope({ contacts, scanAzimuth, scanBar }: RadarScop
 
   // Contacts beyond the selected display scale are listed but not plotted at the rim.
   const visibleContacts = contacts.filter(contact => contact.rangeNm <= maxRangeNm);
+  const contactsByRange = sortRadarContactsByRange(contacts);
+  const primaryContactIndex = contactsByRange.findIndex(
+    contact => contact.targetId === primaryTargetId,
+  );
+  const primaryContact =
+    primaryContactIndex >= 0 ? contactsByRange[primaryContactIndex] : undefined;
 
   return (
     <section
@@ -140,9 +160,25 @@ export default function RadarScope({ contacts, scanAzimuth, scanBar }: RadarScop
         {visibleContacts.map(contact => {
           const position = getContactPosition(contact, maxRangeNm);
           const opacity = Math.max(0.2, 1 - contact.ageSeconds / 4);
+          const isPrimary = contact.targetId === primaryTargetId;
           return (
             <g key={contact.targetId} opacity={opacity}>
-              <circle cx={position.x} cy={position.y} r="3" fill="#a7ffd0" />
+              {isPrimary && (
+                <circle
+                  cx={position.x}
+                  cy={position.y}
+                  r="5"
+                  fill="none"
+                  stroke="#fbbf24"
+                  strokeWidth="1.5"
+                />
+              )}
+              <circle
+                cx={position.x}
+                cy={position.y}
+                r="3"
+                fill={contact.kind === 'adsb' ? '#a7ffd0' : '#a7ffd0'}
+              />
             </g>
           );
         })}
@@ -158,19 +194,28 @@ export default function RadarScope({ contacts, scanAzimuth, scanBar }: RadarScop
         <span>{contacts.length} CONTACT{contacts.length === 1 ? '' : 'S'}</span>
       </footer>
       <div className="flex justify-between px-1 pt-1 text-[9px] text-emerald-300/70">
-        <span>4-BAR · BAR {scanBar}/4</span>
-        <span>= / - RANGE</span>
+        <span>BAR {scanBar}/4</span>
+        <span>N NEXT · = / - RANGE</span>
       </div>
       {contacts.length > 0 && (
         <div className="mt-1 space-y-0.5 border-t border-emerald-900/80 px-1 pt-1 text-[9px] text-emerald-100/90">
-          {contacts.slice(0, 2).map((contact, index) => (
+          {contactsByRange.slice(0, 2).map((contact, index) => (
             <div key={contact.targetId} className="flex justify-between gap-2">
               <span>T{index + 1} {contact.azimuth >= 0 ? '+' : ''}{contact.azimuth.toFixed(0)}°</span>
               <span>{contact.rangeNm.toFixed(1)} NM</span>
-              <span>{contact.elevation >= 0 ? 'UP ' : 'DN '}{Math.abs(contact.elevation).toFixed(0)}°</span>
+              <span>
+                {/*{contact.kind === 'adsb' ? 'ADSB' : ''}*/}
+                {contact.elevation >= 0 ? ' UP ' : ' DN '}
+                {Math.abs(contact.elevation).toFixed(0)}°
+              </span>
             </div>
           ))}
           {contacts.length > 2 && <div>+{contacts.length - 2} TRACKS</div>}
+        </div>
+      )}
+      {primaryContact && (
+        <div className="mt-1 border-t border-emerald-900/80 px-1 pt-1 text-[9px] text-amber-300">
+          PRIMARY T{primaryContactIndex + 1}{/*primaryContact.kind === 'adsb' ? ' · PASSIVE' : ''*/ ''}
         </div>
       )}
     </section>

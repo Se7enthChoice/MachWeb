@@ -21,6 +21,9 @@ interface PreflightScreenProps {
   latitude: string;
   longitude: string;
   initialTime: string;
+  adsbApiKey: string;
+  rememberAdsbApiKey: boolean;
+  adsbKeyStorageError: string;
   timeControlledByHost: boolean;
   error: string;
   onMultiplayerRoleChange(role: 'solo' | 'host' | 'join'): void;
@@ -32,6 +35,8 @@ interface PreflightScreenProps {
   onLatitudeChange(value: string): void;
   onLongitudeChange(value: string): void;
   onInitialTimeChange(value: string): void;
+  onAdsbApiKeyChange(value: string): void;
+  onRememberAdsbApiKeyChange(value: boolean): void;
   onSubmit(event: FormEvent<HTMLFormElement>): void;
 }
 
@@ -47,6 +52,9 @@ export default function PreflightScreen({
   latitude,
   longitude,
   initialTime,
+  adsbApiKey,
+  rememberAdsbApiKey,
+  adsbKeyStorageError,
   timeControlledByHost,
   error,
   onMultiplayerRoleChange,
@@ -58,6 +66,8 @@ export default function PreflightScreen({
   onLatitudeChange,
   onLongitudeChange,
   onInitialTimeChange,
+  onAdsbApiKeyChange,
+  onRememberAdsbApiKeyChange,
   onSubmit,
 }: PreflightScreenProps) {
   // Forwards the edited latitude value to the owning page component.
@@ -265,6 +275,60 @@ export default function PreflightScreen({
               </>
             )}
           </div>
+
+          {multiplayerRole !== 'join' && (
+            <div className="space-y-3 border-t border-zinc-800 pt-5">
+              <div>
+                <h2 className="text-sm font-bold tracking-widest text-zinc-200">LIVE ADS-B TRAFFIC</h2>
+                <p className="mt-2 text-xs leading-5 text-zinc-500">
+                  Optional. This browser polls FlyItalyADSB every 2 seconds within 100 km
+                  (the Free plan&apos;s 30-requests-per-minute limit).
+                  Hosts relay compact position snapshots to joiners; solo flights use the same feed directly.
+                </p>
+              </div>
+              <label className="flex max-w-xl flex-col gap-2 text-xs font-bold tracking-wider text-zinc-400">
+                FLYITALYADSB API KEY
+                <input
+                  type="password"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={adsbApiKey}
+                  onChange={event => onAdsbApiKeyChange(event.target.value)}
+                  aria-label="FlyItalyADSB API key"
+                  placeholder="Optional API key"
+                  className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-3 text-base font-normal tracking-normal text-zinc-100 outline-none transition focus:border-emerald-500"
+                />
+              </label>
+              <label className="flex items-center gap-2 text-xs text-zinc-300">
+                <input
+                  type="checkbox"
+                  checked={rememberAdsbApiKey}
+                  onChange={event => onRememberAdsbApiKeyChange(event.target.checked)}
+                  className="h-4 w-4 accent-emerald-500"
+                />
+                Remember key for this tab session
+              </label>
+              <p className="text-xs leading-5 text-zinc-500">
+                The key is sent only to FlyItalyADSB, never to peers. When enabled, it is saved in
+                this tab&apos;s session storage so it survives reloads. Browser storage is
+                accessible to scripts running on this site, so don&apos;t enable this on a shared
+                or untrusted device. Uncheck to remove the saved copy.
+                {' '}<a
+                  className="text-emerald-300 underline underline-offset-2"
+                  href="https://flyitalyadsb.com/data/api/"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Get an API key
+                </a>
+              </p>
+              {adsbKeyStorageError && (
+                <p role="alert" className="text-xs text-amber-300">
+                  {adsbKeyStorageError}
+                </p>
+              )}
+            </div>
+          )}
 
           {error && (
             <p role="alert" className="text-sm text-red-300">{error}</p>

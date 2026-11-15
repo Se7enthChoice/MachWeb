@@ -61,6 +61,16 @@ std::uint32_t MissileSystem::findImpactTarget(
     return impactTargetId;
 }
 
+std::uint32_t MissileSystem::findImpactableAircraftTargetId(std::uint32_t targetId) const {
+
+    return targetId;
+
+    //for (int index = 0; index < aircraftTargetCount; ++index) {
+    //    if (aircraftTargets[index].id == targetId) return targetId;
+    //}
+    //return 0;
+}
+
 // Preserve the final position and hit identity long enough for clients to render/report impact.
 void MissileSystem::detonate(Missile& missile, std::uint32_t impactTargetId) {
     missile.exploded = true;
@@ -68,9 +78,10 @@ void MissileSystem::detonate(Missile& missile, std::uint32_t impactTargetId) {
     missile.explosionTimeRemaining = explosionDurationSeconds;
 }
 
-// Creates a missile with the nearest launch-time radar track, if one is within weapon range.
+// Creates a missile against the selected or nearest launch-time radar contact.
 int MissileSystem::launch(
     std::uint32_t typeId,
+    std::uint32_t selectedTargetId,
     float posX,
     float altitude,
     float posZ,
@@ -85,18 +96,25 @@ int MissileSystem::launch(
         return 0;
     }
     const int missileIndex = findAvailableMissile();
-    if (missileIndex < 0) return 0;
+    if (missileIndex < 0) return 3;
 
     std::uint32_t targetId = 0;
     float nearestRangeNm = type->maxRangeNm;
     bool hasTrack = false;
+    bool selectedTrackFound = false;
+    bool hasCurrentTargetPosition = false;
+    bool selectedTargetPositionFound = false;
     for (int index = 0; index < radar.getContactCount(); ++index) {
-        hasTrack = true;
         const std::uint32_t candidateId = radar.getContactTargetId(index);
+        if (selectedTargetId != 0 && candidateId != selectedTargetId) continue;
+        hasTrack = true;
+        selectedTrackFound = selectedTargetId == 0 || candidateId == selectedTargetId;
         float targetX = 0.0f;
         float targetAltitude = 0.0f;
         float targetZ = 0.0f;
         if (!radar.getTargetPosition(candidateId, targetX, targetAltitude, targetZ)) continue;
+        hasCurrentTargetPosition = true;
+        if (candidateId == selectedTargetId) selectedTargetPositionFound = true;
         const float deltaX = targetX - posX;
         const float deltaAltitude = targetAltitude - altitude;
         const float deltaZ = targetZ - posZ;
@@ -107,8 +125,13 @@ int MissileSystem::launch(
             nearestRangeNm = rangeNm;
             targetId = candidateId;
         }
+        if (selectedTargetId != 0) break;
     }
-    if (type->radarGuided && hasTrack && targetId == 0) return 0;
+    if (selectedTargetId != 0 && !selectedTrackFound) return 4;
+    if (selectedTargetId != 0 && !selectedTargetPositionFound) return 4;
+    if (type->radarGuided && hasTrack && targetId == 0) {
+        return hasCurrentTargetPosition ? 5 : 4;
+    }
 
     Vector3 forward;
     Vector3 up;
@@ -197,7 +220,7 @@ void MissileSystem::tick(float dt, const Terrain& terrain, const Radar& radar) {
             };
             const float distanceToTarget = std::sqrt(dot(toTarget, toTarget));
             if (distanceToTarget <= impactRadiusFeet) {
-                detonate(missile, missile.targetId);
+                detonate(missile, findImpactableAircraftTargetId(missile.targetId));
                 continue;
             }
 
@@ -235,7 +258,7 @@ void MissileSystem::tick(float dt, const Terrain& terrain, const Radar& radar) {
                 targetZ - missile.posZ,
             };
             if (dot(toTarget, toTarget) <= impactRadiusFeet * impactRadiusFeet) {
-                detonate(missile, missile.targetId);
+                detonate(missile, findImpactableAircraftTargetId(missile.targetId));
                 continue;
             }
         }

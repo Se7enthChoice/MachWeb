@@ -68,13 +68,16 @@ private:
     int findAvailableMissile() const;
     // Finds the closest aircraft within the configured impact radius.
     std::uint32_t findImpactTarget(float posX, float altitude, float posZ) const;
+    // Returns a target ID only for aircraft registered for physical hit impacts.
+    std::uint32_t findImpactableAircraftTargetId(std::uint32_t targetId) const;
     // Stops guidance and starts the short explosion-reporting interval.
     void detonate(Missile& missile, std::uint32_t impactTargetId = 0);
 
 public:
-    // Selects the nearest radar track in range; returns 0=rejected, 1=unguided, 2=guided.
+    // Returns 0=invalid, 1=unguided, 2=guided, 3=no slot, 4=stale track, 5=out of range.
     int launch(
         std::uint32_t typeId,
+        std::uint32_t selectedTargetId,
         float posX,
         float altitude,
         float posZ,
