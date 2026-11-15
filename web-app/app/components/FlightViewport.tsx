@@ -140,7 +140,8 @@ const MAX_REMOTE_SAMPLES = 20;
 const REMOTE_AIRCRAFT_COLORS = [0x38bdf8, 0xfbbf24, 0xf472b6, 0xa3e635, 0xc084fc];
 const TERRAIN_MESH_SEGMENTS = 64;
 const TERRAIN_MESHES_PER_FRAME = 4;
-const TERRAIN_TEXTURES_PER_FRAME = 4;
+const TERRAIN_TILES_WARMED_PER_FRAME = 4;
+const MAX_CACHED_TERRAIN_TEXTURES = 224;
 const MAX_CONCURRENT_IMAGERY_REQUESTS = 8;
 const CLOUD_VOLUME_TILE_SIZE = 1000;
 const CLOUD_VOLUME_HALF_SIZE = 1800;
@@ -901,6 +902,9 @@ export default function FlightViewport({
   const terrainMeshesRef = useRef<
     Array<THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial>>
   >([]);
+  // Satellite textures stay on the GPU across terrain neighborhood changes, which share most tiles.
+  const terrainTextureCacheRef = useRef(new Map<string, THREE.Texture>());
+  const terrainWarmupRef = useRef<((camera: THREE.Camera) => void) | null>(null);
   const [imageryProgress, setImageryProgress] = useState<{
     grid: TerrainGrid;
     status: string;
@@ -914,6 +918,7 @@ export default function FlightViewport({
     const missileInstances = missileInstancesRef.current;
     const explosionEffects = explosionEffectsRef.current;
     const seenExplosions = seenExplosionsRef.current;
+    const terrainTextureCache = terrainTextureCacheRef.current;
 
     // 1. Scene
     const scene = new THREE.Scene();
@@ -1662,6 +1667,8 @@ export default function FlightViewport({
         cloudMaterial.side = cloudSide;
         cloudMaterial.needsUpdate = true;
       }
+      // Terrain warm-up renders consume the shadow update flag, so they run before it is set.
+      terrainWarmupRef.current?.(camera);
       if (renderer.shadowMap.enabled && performance.now() - lastShadowUpdate >= 1000) {
         renderer.shadowMap.needsUpdate = true;
         lastShadowUpdate = performance.now();
@@ -1675,6 +1682,9 @@ export default function FlightViewport({
       cancelAnimationFrame(animId);
       cloudNoiseTexture.dispose();
       snowflakeTexture.dispose();
+      terrainWarmupRef.current = null;
+      terrainTextureCache.forEach(texture => texture.dispose());
+      terrainTextureCache.clear();
       scene.traverse(object => {
         if (object instanceof THREE.DirectionalLight) object.shadow.dispose();
         if (
@@ -1729,15 +1739,17 @@ export default function FlightViewport({
     const fallbackGround = fallbackGroundRef.current;
     const renderer = rendererRef.current;
     if (!scene || !fallbackGround || !renderer) return;
+    const textureCache = terrainTextureCacheRef.current;
     if (!terrainGrid) {
       fallbackGround.visible = true;
       terrainMeshesRef.current.forEach(mesh => {
         scene.remove(mesh);
         mesh.geometry.dispose();
-        if (mesh.material.map) mesh.material.map.dispose();
         mesh.material.dispose();
       });
       terrainMeshesRef.current = [];
+      textureCache.forEach(texture => texture.dispose());
+      textureCache.clear();
       return;
     }
 
@@ -1749,19 +1761,18 @@ export default function FlightViewport({
     let cancelled = false;
     let meshesCommitted = false;
     let meshFrameId = 0;
-    let textureFrameId = 0;
     let nextTileIndex = 0;
-    const pendingTextures: THREE.Texture[] = [];
     let imageryLoaded = false;
+    let warmedTiles = 0;
+    const warmupQueue: number[] = [];
 
-    // Removes a set of meshes and releases their GPU resources.
+    // Removes a set of meshes and releases their GPU resources; cached textures stay alive.
     const disposeMeshes = (
       meshes: Array<THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial>>,
     ) => {
       meshes.forEach(mesh => {
         scene.remove(mesh);
         mesh.geometry.dispose();
-        if (mesh.material.map) mesh.material.map.dispose();
         mesh.material.dispose();
       });
     };
@@ -1840,6 +1851,12 @@ export default function FlightViewport({
           (terrainGrid.originZFeet +
             (tileRow + 0.5) * terrainGrid.tileSize * terrainGrid.spacingZFeet) * visualScale,
         );
+        // Terrain never moves, so skip per-frame matrix updates.
+        mesh.updateMatrix();
+        mesh.matrixAutoUpdate = false;
+        // Hidden until every tile has been uploaded to the GPU and the set is committed.
+        mesh.visible = false;
+        scene.add(mesh);
         tileMeshes.push(mesh);
       }
 
@@ -1854,14 +1871,24 @@ export default function FlightViewport({
       let completedTiles = 0;
       let failedTiles = 0;
 
-      // Replaces the fallback ground after geometry and texture uploads are ready.
+      // Replaces the previous terrain once every new tile is resident on the GPU.
       const commitMeshes = () => {
-        if (cancelled || meshesCommitted || !imageryLoaded || pendingTextures.length > 0) return;
+        if (
+          cancelled ||
+          meshesCommitted ||
+          !imageryLoaded ||
+          warmedTiles < tileMeshes.length
+        ) {
+          return;
+        }
         disposeMeshes(terrainMeshesRef.current);
-        tileMeshes.forEach(mesh => scene.add(mesh));
+        tileMeshes.forEach(mesh => {
+          mesh.visible = true;
+        });
         terrainMeshesRef.current = tileMeshes;
         fallbackGround.visible = false;
         meshesCommitted = true;
+        terrainWarmupRef.current = null;
         setImageryProgress({
           grid: terrainGrid,
           status:
@@ -1871,25 +1898,57 @@ export default function FlightViewport({
         });
       };
 
-      // Limits texture uploads per frame to reduce rendering stalls.
-      const uploadTextureBatch = () => {
-        textureFrameId = 0;
-        if (cancelled) return;
-        for (let count = 0; count < TERRAIN_TEXTURES_PER_FRAME; count += 1) {
-          const texture = pendingTextures.shift();
-          if (!texture) break;
-          renderer.initTexture(texture);
+      // Uploads a few tiles per frame by drawing them into a single scissored pixel, which
+      // avoids one large geometry and texture upload stall when the set is committed.
+      terrainWarmupRef.current = (camera: THREE.Camera) => {
+        const batch = warmupQueue.splice(0, TERRAIN_TILES_WARMED_PER_FRAME);
+        if (batch.length > 0) {
+          batch.forEach(index => {
+            tileMeshes[index].visible = true;
+            tileMeshes[index].frustumCulled = false;
+          });
+          renderer.setScissorTest(true);
+          renderer.setScissor(0, 0, 1, 1);
+          renderer.render(scene, camera);
+          renderer.setScissorTest(false);
+          batch.forEach(index => {
+            tileMeshes[index].visible = false;
+            tileMeshes[index].frustumCulled = true;
+          });
+          warmedTiles += batch.length;
         }
-        if (pendingTextures.length > 0) {
-          textureFrameId = requestAnimationFrame(uploadTextureBatch);
-        } else {
-          commitMeshes();
-        }
+        commitMeshes();
       };
 
-      const queueTextureUpload = (texture: THREE.Texture) => {
-        pendingTextures.push(texture);
-        if (!textureFrameId) textureFrameId = requestAnimationFrame(uploadTextureBatch);
+      // Reuses a cached satellite texture or downloads and configures a new one.
+      const loadTexture = async (tile: { x: number; y: number }) => {
+        const key = `${tile.x}/${tile.y}`;
+        const cached = textureCache.get(key);
+        if (cached) {
+          textureCache.delete(key);
+          textureCache.set(key, cached);
+          return cached;
+        }
+
+        const texture = await textureLoader.loadAsync(getSatelliteTileUrl(tile));
+        const raced = textureCache.get(key);
+        if (raced) {
+          texture.dispose();
+          return raced;
+        }
+
+        texture.generateMipmaps = true;
+        texture.minFilter = THREE.LinearMipmapLinearFilter;
+        texture.magFilter = THREE.LinearFilter;
+        texture.colorSpace = THREE.SRGBColorSpace;
+        textureCache.set(key, texture);
+        while (textureCache.size > MAX_CACHED_TERRAIN_TEXTURES) {
+          const oldestKey = textureCache.keys().next().value;
+          if (oldestKey === undefined) break;
+          textureCache.get(oldestKey)?.dispose();
+          textureCache.delete(oldestKey);
+        }
+        return texture;
       };
 
       // Loads imagery tiles from a bounded pool of concurrent workers.
@@ -1900,33 +1959,25 @@ export default function FlightViewport({
           if (index >= terrainGrid.satelliteTiles.length) return;
 
           try {
-            const texture = await textureLoader.loadAsync(
-              getSatelliteTileUrl(terrainGrid.satelliteTiles[index]),
-            );
-            if (cancelled) {
-              texture.dispose();
-              continue;
-            }
-
-            texture.generateMipmaps = true;
-            texture.minFilter = THREE.LinearMipmapLinearFilter;
-            texture.magFilter = THREE.LinearFilter;
-            texture.colorSpace = THREE.SRGBColorSpace;
+            const texture = await loadTexture(terrainGrid.satelliteTiles[index]);
+            if (cancelled) continue;
 
             const material = tileMeshes[index].material;
             material.map = texture;
             material.vertexColors = false;
             material.needsUpdate = true;
-            queueTextureUpload(texture);
           } catch {
             failedTiles += 1;
           } finally {
             completedTiles += 1;
-            if (!cancelled && completedTiles % 16 === 0) {
-              setImageryProgress({
-                grid: terrainGrid,
-                status: `loading ${completedTiles}/${terrainGrid.satelliteTiles.length}`,
-              });
+            if (!cancelled) {
+              warmupQueue.push(index);
+              if (completedTiles % 16 === 0) {
+                setImageryProgress({
+                  grid: terrainGrid,
+                  status: `loading ${completedTiles}/${terrainGrid.satelliteTiles.length}`,
+                });
+              }
             }
           }
         }
@@ -1949,7 +2000,7 @@ export default function FlightViewport({
     return () => {
       cancelled = true;
       cancelAnimationFrame(meshFrameId);
-      cancelAnimationFrame(textureFrameId);
+      terrainWarmupRef.current = null;
       if (!meshesCommitted) disposeMeshes(tileMeshes);
     };
   }, [terrainGrid]);

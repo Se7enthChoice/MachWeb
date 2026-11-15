@@ -112,6 +112,22 @@ export function getTerrainNeighborhoodKey(
   return tileKey(address);
 }
 
+// One scratch canvas is reused because drawing and reading a tile happen synchronously.
+let decodeContext: CanvasRenderingContext2D | null = null;
+
+function getDecodeContext(): CanvasRenderingContext2D {
+  if (decodeContext) return decodeContext;
+  const canvas = document.createElement('canvas');
+  canvas.width = TILE_SIZE;
+  canvas.height = TILE_SIZE;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) {
+    throw new Error('Could not create a canvas context to decode terrain data.');
+  }
+  decodeContext = context;
+  return context;
+}
+
 // Fetches and decodes one Terrarium PNG tile into meter elevation samples.
 async function decodeTerrariumTile(address: TileAddress): Promise<TerrainTile> {
   const url = `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${TERRAIN_ZOOM}/${address.x}/${address.y}.png`;
@@ -122,14 +138,8 @@ async function decodeTerrariumTile(address: TileAddress): Promise<TerrainTile> {
 
   const bitmap = await createImageBitmap(await response.blob());
   try {
-    const canvas = document.createElement('canvas');
-    canvas.width = TILE_SIZE;
-    canvas.height = TILE_SIZE;
-    const context = canvas.getContext('2d', { willReadFrequently: true });
-    if (!context) {
-      throw new Error('Could not create a canvas context to decode terrain data.');
-    }
-
+    const context = getDecodeContext();
+    context.clearRect(0, 0, TILE_SIZE, TILE_SIZE);
     context.drawImage(bitmap, 0, 0);
     const pixels = context.getImageData(0, 0, TILE_SIZE, TILE_SIZE).data;
     const elevations = new Float32Array(TILE_SIZE * TILE_SIZE);

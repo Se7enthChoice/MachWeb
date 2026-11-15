@@ -118,6 +118,7 @@ const DEFAULT_LONGITUDE = -2.5833;
 
 const MAX_RADAR_TARGETS = 64;
 const TELEMETRY_SEND_INTERVAL_SECONDS = 1 / 30;
+const HUD_UI_INTERVAL_SECONDS = 1 / 30;
 const MAX_RECEIVED_TELEMETRY_SAMPLES = 64;
 const MAX_TELEMETRY_BUFFERED_BYTES = 16 * 1024;
 const REAL_WEATHER_POLL_INTERVAL_MS = 60 * 1000;
@@ -1122,6 +1123,7 @@ export default function Home() {
         let telemetrySendElapsed = 0;
         let radarUiElapsed = 0;
         let rwrUiElapsed = 0;
+        let hudUiElapsed = 0;
 
         const loop = (currentTime: number) => {
           if (disposed) return;
@@ -1294,17 +1296,22 @@ export default function Home() {
               roll: nextRoll,
               heading: nextHeading,
             };
-            setPosX(nextPosX);
-            setAltitude(nextAltitude);
-            setPosZ(nextPosZ);
-            setAirspeed(nextAirspeed);
-            setThrottle(nextThrottle);
-            setPitch(nextPitch);
-            setRoll(nextRoll);
-            setHeading(nextHeading);
-            setVerticalSpeed(nextVerticalSpeed);
             const nextCrashed = engineInstance.getCrashed();
             setCrashed(nextCrashed);
+            // The camera reads localPoseRef every frame, so React only needs HUD-rate updates.
+            hudUiElapsed += clampedDt;
+            if (hudUiElapsed >= HUD_UI_INTERVAL_SECONDS) {
+              hudUiElapsed %= HUD_UI_INTERVAL_SECONDS;
+              setPosX(nextPosX);
+              setAltitude(nextAltitude);
+              setPosZ(nextPosZ);
+              setAirspeed(nextAirspeed);
+              setThrottle(nextThrottle);
+              setPitch(nextPitch);
+              setRoll(nextRoll);
+              setHeading(nextHeading);
+              setVerticalSpeed(nextVerticalSpeed);
+            }
 
             const missileEngine = engineInstance;
             const readMissiles = (): MissileTelemetry[] =>
