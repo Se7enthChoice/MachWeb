@@ -7,6 +7,7 @@ import { getAircraftCoordinates, getLocalPosition, getSatelliteTileUrl } from '.
 import type { TerrainGrid, TerrainOrigin } from '../terrain';
 import { ADSB_POLL_INTERVAL_MS, ADSB_TRACK_TTL_MS } from '../adsb';
 import type { FlightTelemetry, MissileTelemetry } from '../webrtc';
+import type { WeatherState } from '../weather';
 import RadarScope from './RadarScope';
 import type { RadarContact } from './RadarScope';
 import RadarWarningReceiver from './RadarWarningReceiver';
@@ -35,6 +36,7 @@ interface FlightViewportProps {
   terrainOrigin: TerrainOrigin;
   terrainGrid: TerrainGrid | null;
   terrainStatus: string;
+  weather: WeatherState;
   simulationTimeMinutes: number;
 }
 
@@ -50,6 +52,8 @@ interface RemoteAircraftInstance {
   lights: THREE.Group;
   samples: RemoteAircraftSample[];
   lastSequence: number;
+  lastArrivalIntervalMs: number | null;
+  interarrivalJitterMs: number;
 }
 
 interface ExplosionEffect {
@@ -97,7 +101,8 @@ const BOEING_767_DIMENSIONS: AircraftDimensionsFeet = {
   wingspanFeet: 156,
   heightFeet: 52,
 };
-const REMOTE_INTERPOLATION_DELAY_MS = 150;
+const REMOTE_INTERPOLATION_BASE_DELAY_MS = 120;
+const REMOTE_INTERPOLATION_MAX_DELAY_MS = 250;
 const ADSB_INTERPOLATION_DELAY_MS = ADSB_POLL_INTERVAL_MS * 1.25;
 const ADSB_VISUAL_SMOOTHING_SECONDS = 0.35;
 const REMOTE_MISSILE_INTERPOLATION_DELAY_MS = 50;
@@ -109,6 +114,14 @@ const TERRAIN_MESH_SEGMENTS = 64;
 const TERRAIN_MESHES_PER_FRAME = 4;
 const TERRAIN_TEXTURES_PER_FRAME = 4;
 const MAX_CONCURRENT_IMAGERY_REQUESTS = 8;
+const CLOUD_VOLUME_TILE_SIZE = 1000;
+const CLOUD_VOLUME_HALF_SIZE = 1800;
+const CLOUD_NOISE_SIZE = 32;
+const CLOUD_RAYMARCH_STEPS = 48;
+const CLOUD_MIN_BASE_FEET = 10000;
+const PRECIPITATION_PARTICLE_COUNT = 1500;
+const RAIN_STREAK_LENGTH = 6;
+const VISIBILITY_FOG_SCALE = 1.5;
 const CELESTIAL_DISTANCE = 1800;
 const LIGHT_DISTANCE = 1600;
 const FOG_NEAR = 300;
@@ -128,6 +141,261 @@ const terrainColors = [
 ];
 const EXPLOSION_PARTICLE_COUNT = 32;
 const EXPLOSION_DURATION_MS = 1500;
+
+function createSnowflakeTexture(): THREE.DataTexture {
+  const size = 16;
+  const data = new Uint8Array(size * size * 4);
+  const center = (size - 1) / 2;
+  const radius = size * 0.42;
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const distance = Math.hypot(x - center, y - center);
+      const alpha = THREE.MathUtils.clamp((radius - distance) * 2, 0, 1);
+      const offset = (y * size + x) * 4;
+      data[offset] = 255;
+      data[offset + 1] = 255;
+      data[offset + 2] = 255;
+      data[offset + 3] = Math.round(alpha * 255);
+    }
+  }
+  const texture = new THREE.DataTexture(
+    data,
+    size,
+    size,
+    THREE.RGBAFormat,
+    THREE.UnsignedByteType,
+  );
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearFilter;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function cloudHash(x: number, y: number, z: number, period: number, seed: number): number {
+  const wrap = (value: number) => THREE.MathUtils.euclideanModulo(value, period);
+  let hash =
+    Math.imul(wrap(x) + seed, 374761393) ^
+    Math.imul(wrap(y) + seed, 668265263) ^
+    Math.imul(wrap(z) + seed, 2147483647);
+  hash = Math.imul(hash ^ (hash >>> 13), 1274126177);
+  hash ^= hash >>> 16;
+  return (hash >>> 0) / 4294967295;
+}
+
+function cloudValueNoise(x: number, y: number, z: number, frequency: number): number {
+  const sampleX = x * frequency;
+  const sampleY = y * frequency;
+  const sampleZ = z * frequency;
+  const baseX = Math.floor(sampleX);
+  const baseY = Math.floor(sampleY);
+  const baseZ = Math.floor(sampleZ);
+  const smooth = (value: number) => value * value * (3 - 2 * value);
+  const fractionX = smooth(sampleX - baseX);
+  const fractionY = smooth(sampleY - baseY);
+  const fractionZ = smooth(sampleZ - baseZ);
+  const sample = (offsetX: number, offsetY: number, offsetZ: number) =>
+    cloudHash(baseX + offsetX, baseY + offsetY, baseZ + offsetZ, frequency, 17);
+  const mix = (start: number, end: number, amount: number) =>
+    start + (end - start) * amount;
+  const lower = mix(
+    mix(sample(0, 0, 0), sample(1, 0, 0), fractionX),
+    mix(sample(0, 1, 0), sample(1, 1, 0), fractionX),
+    fractionY,
+  );
+  const upper = mix(
+    mix(sample(0, 0, 1), sample(1, 0, 1), fractionX),
+    mix(sample(0, 1, 1), sample(1, 1, 1), fractionX),
+    fractionY,
+  );
+  return mix(lower, upper, fractionZ);
+}
+
+function createCloudNoiseTexture(): THREE.Data3DTexture {
+  const size = CLOUD_NOISE_SIZE;
+  const data = new Uint8Array(size * size * size * 4);
+  const worleyFrequency = 4;
+
+  for (let z = 0; z < size; z += 1) {
+    for (let y = 0; y < size; y += 1) {
+      for (let x = 0; x < size; x += 1) {
+        const normalizedX = x / size;
+        const normalizedY = y / size;
+        const normalizedZ = z / size;
+        const cellX = normalizedX * worleyFrequency;
+        const cellY = normalizedY * worleyFrequency;
+        const cellZ = normalizedZ * worleyFrequency;
+        const baseX = Math.floor(cellX);
+        const baseY = Math.floor(cellY);
+        const baseZ = Math.floor(cellZ);
+        let nearestFeature = Number.POSITIVE_INFINITY;
+
+        for (let offsetZ = -1; offsetZ <= 1; offsetZ += 1) {
+          for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+            for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+              const featureCellX = baseX + offsetX;
+              const featureCellY = baseY + offsetY;
+              const featureCellZ = baseZ + offsetZ;
+              const wrappedX = THREE.MathUtils.euclideanModulo(featureCellX, worleyFrequency);
+              const wrappedY = THREE.MathUtils.euclideanModulo(featureCellY, worleyFrequency);
+              const wrappedZ = THREE.MathUtils.euclideanModulo(featureCellZ, worleyFrequency);
+              const featureX =
+                featureCellX +
+                cloudHash(wrappedX, wrappedY, wrappedZ, worleyFrequency, 29);
+              const featureY =
+                featureCellY +
+                cloudHash(wrappedX, wrappedY, wrappedZ, worleyFrequency, 43);
+              const featureZ =
+                featureCellZ +
+                cloudHash(wrappedX, wrappedY, wrappedZ, worleyFrequency, 71);
+              const distance = Math.hypot(
+                cellX - featureX,
+                cellY - featureY,
+                cellZ - featureZ,
+              );
+              nearestFeature = Math.min(nearestFeature, distance);
+            }
+          }
+        }
+
+        const perlin =
+          cloudValueNoise(normalizedX, normalizedY, normalizedZ, 4) * 0.55 +
+          cloudValueNoise(normalizedX, normalizedY, normalizedZ, 8) * 0.3 +
+          cloudValueNoise(normalizedX, normalizedY, normalizedZ, 16) * 0.15;
+        const worley = THREE.MathUtils.clamp(nearestFeature / 1.2, 0, 1);
+        const offset = (z * size * size + y * size + x) * 4;
+        data[offset] = Math.round((perlin * 0.65 + (1 - worley) * 0.35) * 255);
+        data[offset + 1] = Math.round(
+          cloudValueNoise(normalizedX, normalizedY, normalizedZ, 16) * 255,
+        );
+        data[offset + 2] = Math.round((1 - worley) * 255);
+        data[offset + 3] = 255;
+      }
+    }
+  }
+
+  const texture = new THREE.Data3DTexture(data, size, size, size);
+  texture.format = THREE.RGBAFormat;
+  texture.type = THREE.UnsignedByteType;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.wrapR = THREE.RepeatWrapping;
+  texture.unpackAlignment = 1;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+const CLOUD_VERTEX_SHADER = `
+  out vec3 vWorldPosition;
+
+  void main() {
+    vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+    vWorldPosition = worldPosition.xyz;
+    gl_Position = projectionMatrix * viewMatrix * worldPosition;
+  }
+`;
+
+const CLOUD_FRAGMENT_SHADER = `
+  precision highp float;
+  precision highp sampler3D;
+
+  uniform sampler3D uCloudNoise;
+  uniform vec3 uBoxMin;
+  uniform vec3 uBoxMax;
+  uniform vec3 uNoiseScale;
+  uniform vec3 uCloudColor;
+  uniform vec3 uFogColor;
+  uniform vec3 uSunDirection;
+  uniform vec3 uSunColor;
+  uniform vec3 uAmbientColor;
+  uniform float uCloudCoverage;
+  uniform float uCloudBase;
+  uniform float uCloudDepth;
+  uniform float uFogNear;
+  uniform float uFogFar;
+  uniform float uLightning;
+
+  in vec3 vWorldPosition;
+  out vec4 outColor;
+
+  vec3 linearToSrgb(vec3 color) {
+    vec3 lower = color * 12.92;
+    vec3 higher = 1.055 * pow(max(color, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
+    return mix(higher, lower, lessThanEqual(color, vec3(0.0031308)));
+  }
+
+  void main() {
+    vec3 rayDirection = normalize(vWorldPosition - cameraPosition);
+    vec3 safeDirection = vec3(
+      abs(rayDirection.x) < 0.00001
+        ? (rayDirection.x < 0.0 ? -0.00001 : 0.00001)
+        : rayDirection.x,
+      abs(rayDirection.y) < 0.00001
+        ? (rayDirection.y < 0.0 ? -0.00001 : 0.00001)
+        : rayDirection.y,
+      abs(rayDirection.z) < 0.00001
+        ? (rayDirection.z < 0.0 ? -0.00001 : 0.00001)
+        : rayDirection.z
+    );
+    vec3 inverseDirection = 1.0 / safeDirection;
+    vec3 firstIntersection = (uBoxMin - cameraPosition) * inverseDirection;
+    vec3 secondIntersection = (uBoxMax - cameraPosition) * inverseDirection;
+    vec3 nearIntersection = min(firstIntersection, secondIntersection);
+    vec3 farIntersection = max(firstIntersection, secondIntersection);
+    float rayStart = max(max(nearIntersection.x, nearIntersection.y), nearIntersection.z);
+    float rayEnd = min(min(farIntersection.x, farIntersection.y), farIntersection.z);
+    rayStart = max(rayStart, 0.0);
+    rayEnd = min(rayEnd, uFogFar);
+    if (rayEnd <= rayStart) discard;
+
+    float stepLength = (rayEnd - rayStart) / float(${CLOUD_RAYMARCH_STEPS});
+    float transmittance = 1.0;
+    vec3 radiance = vec3(0.0);
+    float coverageThreshold = mix(0.9, 0.52, uCloudCoverage);
+    float phase = 0.35 + 0.65 * pow(
+      max(dot(-rayDirection, normalize(uSunDirection)), 0.0),
+      2.0
+    );
+
+    for (int stepIndex = 0; stepIndex < ${CLOUD_RAYMARCH_STEPS}; stepIndex++) {
+      float distanceAlongRay = rayStart + (float(stepIndex) + 0.5) * stepLength;
+      if (distanceAlongRay >= rayEnd || transmittance < 0.015) break;
+
+      vec3 worldPosition = cameraPosition + rayDirection * distanceAlongRay;
+      float heightFraction = (worldPosition.y - uCloudBase) / uCloudDepth;
+      if (heightFraction <= 0.0 || heightFraction >= 1.0) continue;
+
+      vec3 noisePosition = worldPosition * uNoiseScale;
+      vec4 noise = texture(uCloudNoise, noisePosition);
+      float detail = texture(uCloudNoise, noisePosition * 4.0).g;
+      float shape = noise.r * 0.72 + noise.b * 0.28;
+      float density = smoothstep(coverageThreshold, coverageThreshold + 0.22, shape);
+      density = max(density - (detail - 0.5) * 0.22, 0.0);
+      float baseFade = smoothstep(0.0, 0.06, heightFraction);
+      float topFade = 1.0 - smoothstep(0.84, 1.0, heightFraction) * 0.75;
+      density *= baseFade * topFade;
+      if (density <= 0.005) continue;
+
+      float lightTransmission = 1.0 - density * 0.28;
+      float fogAmount = smoothstep(uFogNear, uFogFar, distanceAlongRay);
+      vec3 lighting =
+        uAmbientColor * 0.28 +
+        uSunColor * phase * lightTransmission * 0.26;
+      vec3 sampleColor = uCloudColor * lighting;
+      sampleColor = mix(sampleColor, uFogColor, fogAmount * 0.85);
+      sampleColor = mix(sampleColor, vec3(0.9), uLightning * 0.8);
+
+      float sampleAlpha = 1.0 - exp(-density * stepLength * 0.005);
+      radiance += transmittance * sampleColor * sampleAlpha;
+      transmittance *= 1.0 - sampleAlpha;
+    }
+
+    float alpha = 1.0 - transmittance;
+    if (alpha < 0.01) discard;
+    outColor = vec4(linearToSrgb(radiance / alpha), alpha);
+  }
+`;
 
 // Selects a fallback vertex color based on terrain elevation in meters.
 function terrainColor(elevationMeters: number): THREE.Color {
@@ -526,6 +794,7 @@ export default function FlightViewport({
   terrainOrigin,
   terrainGrid,
   terrainStatus,
+  weather,
   simulationTimeMinutes,
 }: FlightViewportProps) {
   const mountRef = useRef<HTMLDivElement>(null);
@@ -533,6 +802,7 @@ export default function FlightViewport({
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const simulationTimeRef = useRef(simulationTimeMinutes);
+  const weatherRef = useRef(weather);
   const terrainOriginRef = useRef(terrainOrigin);
   const localPlayerIdRef = useRef(localPlayerId);
   const fallbackGroundRef = useRef<THREE.Group | null>(null);
@@ -636,6 +906,88 @@ export default function FlightViewport({
     );
     scene.add(sunMarker, moonMarker);
 
+    const cloudNoiseTexture = createCloudNoiseTexture();
+    const cloudMaterial = new THREE.ShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      uniforms: {
+        uCloudNoise: { value: cloudNoiseTexture },
+        uBoxMin: { value: new THREE.Vector3() },
+        uBoxMax: { value: new THREE.Vector3() },
+        uNoiseScale: { value: new THREE.Vector3(0.003, 0.012, 0.003) },
+        uCloudColor: { value: new THREE.Color(0xa8b2bc) },
+        uFogColor: { value: new THREE.Color() },
+        uSunDirection: { value: new THREE.Vector3(0, 1, 0) },
+        uSunColor: { value: new THREE.Color(0xffffff) },
+        uAmbientColor: { value: new THREE.Color(0xffffff) },
+        uCloudCoverage: { value: 0 },
+        uCloudBase: { value: 0 },
+        uCloudDepth: { value: 1 },
+        uFogNear: { value: FOG_NEAR },
+        uFogFar: { value: FOG_FAR },
+        uLightning: { value: 0 },
+      },
+      vertexShader: CLOUD_VERTEX_SHADER,
+      fragmentShader: CLOUD_FRAGMENT_SHADER,
+      transparent: true,
+      depthWrite: false,
+      toneMapped: false,
+      side: THREE.FrontSide,
+    });
+    const cloudVolume = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), cloudMaterial);
+    cloudVolume.frustumCulled = false;
+    cloudVolume.visible = false;
+    scene.add(cloudVolume);
+
+    const precipitationPositions = new Float32Array(PRECIPITATION_PARTICLE_COUNT * 6);
+    const precipitationGeometry = new THREE.BufferGeometry();
+    const precipitationPositionAttribute = new THREE.BufferAttribute(
+      precipitationPositions,
+      3,
+    );
+    precipitationPositionAttribute.setUsage(THREE.DynamicDrawUsage);
+    precipitationGeometry.setAttribute(
+      'position',
+      precipitationPositionAttribute,
+    );
+    const precipitationMaterial = new THREE.LineBasicMaterial({
+      color: 0xb9d8ec,
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+    });
+    const precipitation = new THREE.LineSegments(
+      precipitationGeometry,
+      precipitationMaterial,
+    );
+    precipitation.frustumCulled = false;
+    precipitation.visible = false;
+    scene.add(precipitation);
+
+    const snowfallPositions = new Float32Array(PRECIPITATION_PARTICLE_COUNT * 3);
+    const snowfallGeometry = new THREE.BufferGeometry();
+    const snowfallPositionAttribute = new THREE.BufferAttribute(snowfallPositions, 3);
+    snowfallPositionAttribute.setUsage(THREE.DynamicDrawUsage);
+    snowfallGeometry.setAttribute('position', snowfallPositionAttribute);
+    const snowflakeTexture = createSnowflakeTexture();
+    const snowfallMaterial = new THREE.PointsMaterial({
+      color: 0xf3f8ff,
+      size: 1.2,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+      sizeAttenuation: true,
+      map: snowflakeTexture,
+      alphaTest: 0.05,
+    });
+    const snowfall = new THREE.Points(snowfallGeometry, snowfallMaterial);
+    snowfall.frustumCulled = false;
+    snowfall.visible = false;
+    scene.add(snowfall);
+
+    const lightningFlash = new THREE.PointLight(0xd9efff, 0, 2500, 1.2);
+    lightningFlash.castShadow = false;
+    scene.add(lightningFlash);
+
     const lightTarget = new THREE.Vector3();
     const sunDirection = new THREE.Vector3();
     const moonDirection = new THREE.Vector3();
@@ -644,8 +996,58 @@ export default function FlightViewport({
     const ambientColor = new THREE.Color();
     const sunlightColor = new THREE.Color();
     const moonlightColor = new THREE.Color();
+    const lightningSky = new THREE.Color(0xdceeff);
+    const cloudySky = new THREE.Color(0x8997a2);
     let lastShadowUpdate = 0;
+    let cloudSignature = '';
+    let cloudCellX = Number.NaN;
+    let cloudCellZ = Number.NaN;
+    let precipitationInitializedCount = 0;
+    let lightningUntil = 0;
+    let nextLightningAt = performance.now() + 4000 + Math.random() * 8000;
     renderer.shadowMap.autoUpdate = false;
+
+    const updateCloudVolume = (
+      currentWeather: WeatherState,
+      centerTileX: number,
+      centerTileZ: number,
+    ): void => {
+      const cloudBaseFeet = Math.max(CLOUD_MIN_BASE_FEET, currentWeather.cloudBaseFeet);
+      const cloudTopFeet = Math.max(cloudBaseFeet + 5000, currentWeather.cloudTopFeet);
+      const cloudBase = cloudBaseFeet * visualScale;
+      const cloudDepth = (cloudTopFeet - cloudBaseFeet) * visualScale;
+      const centerX = (centerTileX + 0.5) * CLOUD_VOLUME_TILE_SIZE;
+      const centerZ = (centerTileZ + 0.5) * CLOUD_VOLUME_TILE_SIZE;
+      const minX = centerX - CLOUD_VOLUME_HALF_SIZE;
+      const minY = cloudBase;
+      const minZ = centerZ - CLOUD_VOLUME_HALF_SIZE;
+      const maxX = centerX + CLOUD_VOLUME_HALF_SIZE;
+      const maxY = cloudBase + cloudDepth;
+      const maxZ = centerZ + CLOUD_VOLUME_HALF_SIZE;
+      const uniforms = cloudMaterial.uniforms;
+
+      cloudVolume.position.set(centerX, cloudBase + cloudDepth * 0.5, centerZ);
+      cloudVolume.scale.set(
+        CLOUD_VOLUME_HALF_SIZE * 2,
+        cloudDepth,
+        CLOUD_VOLUME_HALF_SIZE * 2,
+      );
+      cloudVolume.updateMatrixWorld();
+      uniforms.uBoxMin.value.set(minX, minY, minZ);
+      uniforms.uBoxMax.value.set(maxX, maxY, maxZ);
+      uniforms.uCloudBase.value = cloudBase;
+      uniforms.uCloudDepth.value = cloudDepth;
+      uniforms.uCloudCoverage.value = THREE.MathUtils.clamp(
+        currentWeather.cloudCoverPercent / 100,
+        0,
+        1,
+      );
+      uniforms.uCloudColor.value.set(
+        currentWeather.kind === 'storm' ? 0x78838d :
+          currentWeather.kind === 'rain' ? 0x9ba8b2 : 0xe9f0f3,
+      );
+      cloudVolume.visible = currentWeather.cloudCoverPercent > 8;
+    };
 
     const handleResize = () => {
       const w = Math.max(currentMount.clientWidth, 1);
@@ -667,6 +1069,122 @@ export default function FlightViewport({
       const now = performance.now();
       const frameSeconds = Math.min(Math.max((now - previousFrameTime) / 1000, 0), 0.1);
       previousFrameTime = now;
+      const currentWeather = weatherRef.current;
+      const nextCloudCellX = Math.floor(camera.position.x / CLOUD_VOLUME_TILE_SIZE);
+      const nextCloudCellZ = Math.floor(camera.position.z / CLOUD_VOLUME_TILE_SIZE);
+      const nextCloudSignature = [
+        currentWeather.kind,
+        currentWeather.cloudCoverPercent,
+        currentWeather.cloudBaseFeet,
+        currentWeather.cloudTopFeet,
+      ].join(':');
+      if (
+        nextCloudSignature !== cloudSignature ||
+        nextCloudCellX !== cloudCellX ||
+        nextCloudCellZ !== cloudCellZ
+      ) {
+        updateCloudVolume(currentWeather, nextCloudCellX, nextCloudCellZ);
+        cloudSignature = nextCloudSignature;
+        cloudCellX = nextCloudCellX;
+        cloudCellZ = nextCloudCellZ;
+      }
+
+      const isSnowing = currentWeather.snowCentimetersPerHour > 0.02;
+      const isPrecipitating =
+        currentWeather.rainMillimetersPerHour > 0.05 || isSnowing;
+      const particleCount = Math.round(
+        PRECIPITATION_PARTICLE_COUNT *
+        THREE.MathUtils.clamp(currentWeather.precipitationDensity, 0, 1),
+      );
+      precipitation.visible = isPrecipitating && !isSnowing;
+      snowfall.visible = isSnowing;
+      precipitationGeometry.setDrawRange(0, particleCount * 2);
+      snowfallGeometry.setDrawRange(0, particleCount);
+      if (!isPrecipitating) precipitationInitializedCount = 0;
+      precipitationMaterial.color.set(0xb9d8ec);
+      precipitationMaterial.opacity = THREE.MathUtils.clamp(
+        0.35 + currentWeather.rainMillimetersPerHour * 0.06,
+        0.35,
+        0.85,
+      );
+      if (isPrecipitating) {
+        const positions = precipitationGeometry.attributes.position.array as Float32Array;
+        const snowPositions = snowfallGeometry.attributes.position.array as Float32Array;
+        const fallSpeed = isSnowing ? 1.8 : 18;
+        const windEastSpeed = currentWeather.windEastKnots * 0.016878;
+        const windNorthSpeed = -currentWeather.windNorthKnots * 0.016878;
+        const windX = windEastSpeed * frameSeconds;
+        const windZ = windNorthSpeed * frameSeconds;
+        const streakLength = RAIN_STREAK_LENGTH;
+        const streakDuration = streakLength / fallSpeed;
+        for (let index = 0; index < particleCount; index += 1) {
+          const offset = index * 6;
+          const flutter = isSnowing
+            ? Math.sin(now * 0.0012 + index * 0.73) * 1.2 * frameSeconds
+            : 0;
+          let x = positions[offset] + windX + flutter;
+          let y = positions[offset + 1] - fallSpeed * frameSeconds;
+          let z = positions[offset + 2] + windZ +
+            (isSnowing ? Math.cos(now * 0.001 + index * 0.61) * 1.2 * frameSeconds : 0);
+          const relativeX = x - camera.position.x;
+          const relativeY = y - camera.position.y;
+          const relativeZ = z - camera.position.z;
+          const distance = Math.hypot(relativeX, relativeY, relativeZ);
+          if (
+            index >= precipitationInitializedCount ||
+            distance > 360
+          ) {
+            const spawnAzimuth = Math.random() * Math.PI * 2;
+            const verticalDirection = Math.random() * 2 - 1;
+            const horizontalDirection = Math.sqrt(1 - verticalDirection ** 2);
+            const spawnRadius = Math.cbrt(Math.random()) * 280;
+            x =
+              camera.position.x +
+              Math.cos(spawnAzimuth) * horizontalDirection * spawnRadius;
+            y = camera.position.y + verticalDirection * spawnRadius;
+            z =
+              camera.position.z +
+              Math.sin(spawnAzimuth) * horizontalDirection * spawnRadius;
+          }
+          positions[offset] = x;
+          positions[offset + 1] = y;
+          positions[offset + 2] = z;
+          if (isSnowing) {
+            const snowOffset = index * 3;
+            snowPositions[snowOffset] = x;
+            snowPositions[snowOffset + 1] = y;
+            snowPositions[snowOffset + 2] = z;
+            positions[offset + 3] = x;
+            positions[offset + 4] = y;
+            positions[offset + 5] = z;
+          } else {
+            positions[offset + 3] = x - windEastSpeed * streakDuration;
+            positions[offset + 4] = y + streakLength;
+            positions[offset + 5] = z - windNorthSpeed * streakDuration;
+          }
+        }
+        precipitationInitializedCount = particleCount;
+        precipitationPositionAttribute.needsUpdate = true;
+        snowfallPositionAttribute.needsUpdate = true;
+      }
+
+      let lightningActive = false;
+      if (currentWeather.lightning) {
+        if (now >= nextLightningAt) {
+          lightningUntil = now + 90 + Math.random() * 100;
+          nextLightningAt = now + 5000 + Math.random() * 11000;
+        }
+        lightningActive = now < lightningUntil;
+      } else {
+        lightningUntil = 0;
+      }
+      lightningFlash.intensity = lightningActive ? 1400 : 0;
+      lightningFlash.position.set(
+        camera.position.x + 180,
+        currentWeather.cloudTopFeet * visualScale,
+        camera.position.z - 140,
+      );
+
       const missileSmoothing = 1 - Math.exp(
         -frameSeconds / MISSILE_VISUAL_SMOOTHING_SECONDS,
       );
@@ -677,9 +1195,14 @@ export default function FlightViewport({
       for (const instance of remoteAircrafts.values()) {
         const { aircraft, lights, samples } = instance;
         const isAdsb = samples[0]?.telemetry.playerId.startsWith('adsb:') ?? false;
-        const renderTime = now - (
-          isAdsb ? ADSB_INTERPOLATION_DELAY_MS : REMOTE_INTERPOLATION_DELAY_MS
-        );
+        const interpolationDelay = isAdsb
+          ? ADSB_INTERPOLATION_DELAY_MS
+          : THREE.MathUtils.clamp(
+              REMOTE_INTERPOLATION_BASE_DELAY_MS + instance.interarrivalJitterMs * 2,
+              REMOTE_INTERPOLATION_BASE_DELAY_MS,
+              REMOTE_INTERPOLATION_MAX_DELAY_MS,
+            );
+        const renderTime = now - interpolationDelay;
         const isNight = timeMinutes >= 18 * 60 || timeMinutes < 6 * 60;
         lights.visible = isNight;
         while (samples.length > 2 && samples[1].receivedAt <= renderTime) samples.shift();
@@ -924,13 +1447,36 @@ export default function FlightViewport({
         .copy(NIGHT_SKY)
         .lerp(TWILIGHT_SKY, twilight)
         .lerp(DAY_SKY, daylight);
+      const cloudCover = THREE.MathUtils.clamp(currentWeather.cloudCoverPercent / 100, 0, 1);
+      sky.lerp(cloudySky, cloudCover * 0.5);
+      if (lightningActive) sky.lerp(lightningSky, 0.62);
 
       scene.background = sky;
-      if (scene.fog instanceof THREE.Fog) scene.fog.color.copy(sky);
+      if (scene.fog instanceof THREE.Fog) {
+        scene.fog.color.copy(sky);
+        const visibilityFar = currentWeather.visibilityMeters === null
+          ? FOG_FAR
+          : Math.min(
+              FOG_FAR,
+              Math.max(
+                FOG_NEAR * 2,
+                currentWeather.visibilityMeters *
+                  feetPerMeter *
+                  visualScale *
+                  VISIBILITY_FOG_SCALE,
+              ),
+            );
+        scene.fog.near = currentWeather.visibilityMeters === null
+          ? FOG_NEAR
+          : FOG_NEAR;
+        scene.fog.far = Math.max(scene.fog.near + 0.1, visibilityFar);
+      }
       ambientLight.color.copy(ambientColor.copy(NIGHT_LIGHT).lerp(DAY_LIGHT, daylight));
-      ambientLight.intensity = 0.18 + daylight * 1.02;
+      ambientLight.intensity = 0.18 + daylight * (1.02 - cloudCover * 0.3) +
+        (lightningActive ? 0.8 : 0);
       dirLight.color.copy(sunlightColor.copy(TWILIGHT_SKY).lerp(DAY_LIGHT, daylight));
-      dirLight.intensity = 0.08 + daylight * 1.92;
+      dirLight.intensity = 0.08 + daylight * (1.92 - cloudCover * 0.85) +
+        (lightningActive ? 1.4 : 0);
       dirLight.castShadow = daylight > 0.05;
       moonLight.color.copy(moonlightColor.copy(NIGHT_LIGHT).lerp(DAY_LIGHT, daylight));
       moonLight.intensity = 0.22 * (1 - daylight);
@@ -964,6 +1510,29 @@ export default function FlightViewport({
         0,
         0.9,
       );
+      const cloudUniforms = cloudMaterial.uniforms;
+      const fog = scene.fog instanceof THREE.Fog ? scene.fog : null;
+      cloudUniforms.uFogColor.value.copy(sky);
+      cloudUniforms.uFogNear.value = fog?.near ?? FOG_NEAR;
+      cloudUniforms.uFogFar.value = fog?.far ?? FOG_FAR;
+      cloudUniforms.uSunDirection.value.copy(sunDirection);
+      cloudUniforms.uSunColor.value.copy(dirLight.color).multiplyScalar(dirLight.intensity);
+      cloudUniforms.uAmbientColor.value
+        .copy(ambientLight.color)
+        .multiplyScalar(ambientLight.intensity);
+      cloudUniforms.uLightning.value = lightningActive ? 0.85 : 0;
+      const cameraInsideCloud =
+        camera.position.x > cloudUniforms.uBoxMin.value.x &&
+        camera.position.x < cloudUniforms.uBoxMax.value.x &&
+        camera.position.y > cloudUniforms.uBoxMin.value.y &&
+        camera.position.y < cloudUniforms.uBoxMax.value.y &&
+        camera.position.z > cloudUniforms.uBoxMin.value.z &&
+        camera.position.z < cloudUniforms.uBoxMax.value.z;
+      const cloudSide = cameraInsideCloud ? THREE.BackSide : THREE.FrontSide;
+      if (cloudMaterial.side !== cloudSide) {
+        cloudMaterial.side = cloudSide;
+        cloudMaterial.needsUpdate = true;
+      }
       if (renderer.shadowMap.enabled && performance.now() - lastShadowUpdate >= 1000) {
         renderer.shadowMap.needsUpdate = true;
         lastShadowUpdate = performance.now();
@@ -975,6 +1544,8 @@ export default function FlightViewport({
     return () => {
       resizeObserver.disconnect();
       cancelAnimationFrame(animId);
+      cloudNoiseTexture.dispose();
+      snowflakeTexture.dispose();
       scene.traverse(object => {
         if (object instanceof THREE.DirectionalLight) object.shadow.dispose();
         if (
@@ -1009,6 +1580,10 @@ export default function FlightViewport({
   useEffect(() => {
     simulationTimeRef.current = simulationTimeMinutes;
   }, [simulationTimeMinutes]);
+
+  useEffect(() => {
+    weatherRef.current = weather;
+  }, [weather]);
 
   // Keeps geographic conversion aligned with the latest flight origin.
   useEffect(() => {
@@ -1291,14 +1866,29 @@ export default function FlightViewport({
           ...model,
           samples: [],
           lastSequence: -1,
+          lastArrivalIntervalMs: null,
+          interarrivalJitterMs: 0,
         };
         remoteAircraftRef.current.set(telemetry.playerId, instance);
       }
       if (telemetry.sequence <= instance.lastSequence) continue;
 
       const localPosition = getLocalPosition(terrainOrigin, telemetry);
+      const receivedAt = performance.now();
+      const previousSample = instance.samples[instance.samples.length - 1];
+      if (previousSample) {
+        const arrivalIntervalMs = receivedAt - previousSample.receivedAt;
+        if (instance.lastArrivalIntervalMs !== null) {
+          const intervalVariation = Math.abs(
+            arrivalIntervalMs - instance.lastArrivalIntervalMs,
+          );
+          instance.interarrivalJitterMs +=
+            (intervalVariation - instance.interarrivalJitterMs) * 0.25;
+        }
+        instance.lastArrivalIntervalMs = arrivalIntervalMs;
+      }
       instance.samples.push({
-        receivedAt: performance.now(),
+        receivedAt,
         telemetry,
         posXFeet: localPosition.posXFeet,
         posZFeet: localPosition.posZFeet,
@@ -1432,6 +2022,10 @@ export default function FlightViewport({
       <div className="pointer-events-none absolute right-3 top-3 rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 font-mono text-xs text-zinc-200 backdrop-blur">
         LOCAL TIME {Math.floor(simulationTimeMinutes / 60).toString().padStart(2, '0')}:
         {Math.floor(simulationTimeMinutes % 60).toString().padStart(2, '0')}
+      </div>
+      <div className="pointer-events-none absolute right-3 top-10 rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 font-mono text-[10px] text-sky-200 backdrop-blur sm:text-xs">
+        {weather.kind.toUpperCase()} · WIND{' '}
+        {Math.round(Math.hypot(weather.windEastKnots, weather.windNorthKnots))} KT
       </div>
       {crashed && (
         <div className="pointer-events-none absolute right-3 top-3 rounded border border-red-500/60 bg-red-950/85 px-3 py-1 font-mono text-sm font-bold tracking-widest text-red-300 backdrop-blur">

@@ -11,6 +11,8 @@ private:
     float velocityX = 0.0f;
     float velocityY = 0.0f;
     float velocityZ = -300.0f * KTs_to_FPS;
+    float windX = 0.0f;
+    float windZ = 0.0f;
     float airspeed = 300.0f;
     float throttle = 0.43f;
     float crashTimeRemaining = 0.0f;
@@ -39,6 +41,7 @@ public:
     void setRollInput(float value);
     void setYawInput(float value);
     void setThrottle(float value);
+    void setWind(float eastKnots, float northKnots);
 
     float getPosX() const { return posX; }
     float getAltitude() const { return altitude; }

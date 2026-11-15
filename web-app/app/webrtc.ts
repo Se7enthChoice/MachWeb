@@ -1,3 +1,5 @@
+import type { WeatherPreset } from './weather';
+
 // Flight telemetry data associated with a peer connection.
 export interface FlightTelemetry {
   playerId: string;
@@ -111,6 +113,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+function isWeatherPreset(value: unknown): value is WeatherPreset {
+  return value === 'sun' || value === 'rain' || value === 'snow' ||
+    value === 'storm' || value === 'real';
+}
+
 // Validates the complete telemetry payload before it is used or relayed.
 function isFlightTelemetry(value: unknown): value is FlightTelemetry {
   if (!isRecord(value)) return false;
@@ -218,6 +225,29 @@ export function parseFlightTimeMessage(
     }
 
     return { minutes: parsed.minutes, sequence: parsed.sequence };
+  } catch {
+    return null;
+  }
+}
+
+// Parses a host-selected weather preset message from a peer.
+export function parseFlightWeatherMessage(
+  message: string,
+): { preset: WeatherPreset; sequence: number } | null {
+  try {
+    const parsed: unknown = JSON.parse(message);
+    if (
+      !isRecord(parsed) ||
+      parsed.type !== 'flight-weather' ||
+      !isWeatherPreset(parsed.preset) ||
+      typeof parsed.sequence !== 'number' ||
+      !Number.isSafeInteger(parsed.sequence) ||
+      parsed.sequence < 0
+    ) {
+      return null;
+    }
+
+    return { preset: parsed.preset, sequence: parsed.sequence };
   } catch {
     return null;
   }

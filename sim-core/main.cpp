@@ -42,6 +42,9 @@ public:
     void setRollInput(float value) { aircraft.setRollInput(value); }
     void setYawInput(float value) { aircraft.setYawInput(value); }
     void setThrottle(float value) { aircraft.setThrottle(value); }
+    void setWind(float eastKnots, float northKnots) {
+        aircraft.setWind(eastKnots, northKnots);
+    }
     void setRadarEnabled(bool enabled) {
         if (radarEnabled == enabled) return;
         radarEnabled = enabled;
@@ -144,6 +147,7 @@ EMSCRIPTEN_BINDINGS(sim_engine) {
         .function("setRollInput", &SimEngine::setRollInput)
         .function("setYawInput", &SimEngine::setYawInput)
         .function("setThrottle", &SimEngine::setThrottle)
+        .function("setWind", &SimEngine::setWind)
         .function("setRadarEnabled", &SimEngine::setRadarEnabled)
         .function("clearRadarTargets", &SimEngine::clearRadarTargets)
         .function("addRadarTarget", &SimEngine::addRadarTarget)

@@ -115,9 +115,9 @@ void FlightModel::tick(float dt, const Terrain& terrain) {
         velocityZ *= scale;
     }
 
-    posX += velocityX * dt;
+    posX += (velocityX + windX) * dt;
     altitude += velocityY * dt;
-    posZ += velocityZ * dt;
+    posZ += (velocityZ + windZ) * dt;
     verticalSpeed = velocityY * 60.0f;
 
     posX = clamp_finite(posX, -100000000.0f, 100000000.0f);
@@ -199,4 +199,10 @@ void FlightModel::setYawInput(float value) {
 // Updates throttle for finite input, clamping the normalized value to [0, 1].
 void FlightModel::setThrottle(float value) {
     if (std::isfinite(value)) throttle = std::clamp(value, 0.0f, 1.0f);
+}
+
+// Stores bounded east/north ambient wind in feet per second.
+void FlightModel::setWind(float eastKnots, float northKnots) {
+    windX = clamp_finite(eastKnots, -150.0f, 150.0f) * KTs_to_FPS;
+    windZ = -clamp_finite(northKnots, -150.0f, 150.0f) * KTs_to_FPS;
 }

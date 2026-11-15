@@ -24,8 +24,15 @@ import {
 } from './terrain';
 import type { TerrainGrid, TerrainOrigin } from './terrain';
 import {
+  createPresetWeather,
+  createRealWeatherLoadingState,
+  fetchCurrentWeather,
+} from './weather';
+import type { WeatherPreset, WeatherState } from './weather';
+import {
   decodeSessionDescription,
   encodeSessionDescription,
+  parseFlightWeatherMessage,
   parseFlightTimeMessage,
   parseFlightTelemetryMessage,
   waitForIceGatheringComplete,
@@ -38,6 +45,7 @@ interface SimEngineInstance {
   setRollInput(value: number): void;
   setYawInput(value: number): void;
   setThrottle(value: number): void;
+  setWind(eastKnots: number, northKnots: number): void;
   setTerrainData(
     dataPointer: number,
     width: number,
@@ -104,8 +112,9 @@ const DEFAULT_LATITUDE = 51.5000;
 const DEFAULT_LONGITUDE = -2.5833;
 
 const MAX_RADAR_TARGETS = 64;
-const TELEMETRY_SEND_INTERVAL_SECONDS = 0.05;
+const TELEMETRY_SEND_INTERVAL_SECONDS = 1 / 30;
 const MAX_TELEMETRY_BUFFERED_BYTES = 16 * 1024;
+const REAL_WEATHER_POLL_INTERVAL_MS = 60 * 1000;
 const ADSB_API_KEY_SESSION_STORAGE_KEY = 'machweb.adsbApiKey';
 
 // Generates a UUID without requiring a secure context. crypto.randomUUID() is
@@ -249,6 +258,10 @@ export default function Home() {
   });
   const [terrainGrid, setTerrainGrid] = useState<TerrainGrid | null>(null);
   const [terrainStatus, setTerrainStatus] = useState('waiting for flight dynamics');
+  const [weatherPreset, setWeatherPreset] = useState<WeatherPreset>('real');
+  const weatherPresetRef = useRef<WeatherPreset>('real');
+  const [weather, setWeather] = useState<WeatherState>(() => createRealWeatherLoadingState());
+  const [weatherStatus, setWeatherStatus] = useState('');
   const [setupError, setSetupError] = useState('');
   const [adsbApiKey, setAdsbApiKey] = useState('');
   const [rememberAdsbApiKey, setRememberAdsbApiKey] = useState(false);
@@ -346,6 +359,7 @@ export default function Home() {
 
   // Mutable values shared with callbacks and animation loops without rerendering.
   const throttleRef = useRef(0.43);
+  const weatherRef = useRef(weather);
   const radarEnabledRef = useRef(radarEnabled);
   const engineRef = useRef<SimEngineInstance | null>(null);
   const wasmModuleRef = useRef<SimEngineModule | null>(null);
@@ -355,6 +369,7 @@ export default function Home() {
   const peerPlayersRef = useRef(new Map<string, Set<string>>());
   const multiplayerOperationRef = useRef(false);
   const hostTimeSequenceRef = useRef(0);
+  const hostWeatherSequenceRef = useRef(0);
   const playerIdRef = useRef('');
   const telemetrySequenceRef = useRef(0);
   const remoteTelemetriesRef = useRef<FlightTelemetry[]>([]);
@@ -457,6 +472,18 @@ export default function Home() {
     }
   };
 
+  const sendHostWeather = (channel: RTCDataChannel, preset: WeatherPreset): void => {
+    if (channel.readyState !== 'open') return;
+    const sequence = hostWeatherSequenceRef.current;
+    hostWeatherSequenceRef.current += 1;
+    try {
+      channel.send(JSON.stringify({ type: 'flight-weather', preset, sequence }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setMultiplayerStatus(`Could not sync host weather: ${message}`);
+    }
+  };
+
   const sendAdsbSnapshot = useCallback((
     channel: RTCDataChannel,
     sequence: number,
@@ -538,6 +565,7 @@ export default function Home() {
   ): void => {
     const lastReceivedSequences = new Map<string, number>();
     let lastReceivedTimeSequence = -1;
+    let lastReceivedWeatherSequence = -1;
     let lastReceivedAdsbSequence = -1;
     let receivedHostTelemetry = false;
     dataChannelsRef.current.set(sessionId, channel);
@@ -556,6 +584,7 @@ export default function Home() {
         const timeParts = initialTimeInput.split(':').map(Number);
         const selectedTime = timeParts[0] * 60 + timeParts[1];
         sendHostTime(channel, simulationStarted ? simulationTimeRef.current : selectedTime);
+        sendHostWeather(channel, weatherPresetRef.current);
         sendAdsbSnapshot(channel, adsbSequenceRef.current, adsbAircraftRef.current);
       }
     };
@@ -606,6 +635,15 @@ export default function Home() {
           setFlightStartTimeMinutes(hostTime.minutes);
           setSimulationTimeMinutes(hostTime.minutes);
           setInitialTimeInput(formatTimeOfDay(hostTime.minutes));
+        }
+        return;
+      }
+
+      const hostWeather = parseFlightWeatherMessage(event.data);
+      if (hostWeather) {
+        if (role === 'join' && hostWeather.sequence > lastReceivedWeatherSequence) {
+          lastReceivedWeatherSequence = hostWeather.sequence;
+          applyWeatherPreset(hostWeather.preset);
         }
         return;
       }
@@ -839,6 +877,30 @@ export default function Home() {
     );
   };
 
+  const applyWeatherPreset = (preset: WeatherPreset): void => {
+    weatherPresetRef.current = preset;
+    setWeatherPreset(preset);
+    if (preset === 'real') {
+      const loadingWeather = createRealWeatherLoadingState();
+      weatherRef.current = loadingWeather;
+      setWeather(loadingWeather);
+      setWeatherStatus('');
+      return;
+    }
+    const nextWeather = createPresetWeather(preset);
+    weatherRef.current = nextWeather;
+    setWeather(nextWeather);
+    setWeatherStatus('');
+  };
+
+  const handleWeatherPresetChange = (preset: WeatherPreset): void => {
+    if (multiplayerRole === 'join') return;
+    applyWeatherPreset(preset);
+    if (multiplayerRole === 'host') {
+      dataChannelsRef.current.forEach(channel => sendHostWeather(channel, preset));
+    }
+  };
+
   // Validates preflight inputs and initializes state for a new flight.
   const handleStartFlight = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
@@ -869,11 +931,19 @@ export default function Home() {
       return;
     }
 
+    setSetupError('');
     const startTimeMinutes =
       multiplayerRole === 'join' && multiplayerConnected
         ? simulationTimeRef.current
         : timeParts[0] * 60 + timeParts[1];
-    setSetupError('');
+    const flightWeather = weatherPreset === 'real'
+      ? createRealWeatherLoadingState()
+      : weatherRef.current;
+    weatherRef.current = flightWeather;
+    setWeather(flightWeather);
+    setWeatherStatus(
+      weatherPreset === 'real' ? 'REAL weather · fetching aircraft location…' : '',
+    );
     setTerrainGrid(null);
     setTerrainOrigin({ latitude, longitude });
     setFlightStartTimeMinutes(startTimeMinutes);
@@ -923,6 +993,12 @@ export default function Home() {
     missileLaunchRequestedRef.current = false;
     processedMissileImpactsRef.current.clear();
     setAdsbStatus('ADS-B off - add an API key in preflight.');
+    setWeatherPreset('real');
+    weatherPresetRef.current = 'real';
+    const defaultWeather = createRealWeatherLoadingState();
+    weatherRef.current = defaultWeather;
+    setWeather(defaultWeather);
+    setWeatherStatus('');
   };
 
   // Simulation lifecycle and synchronization effects.
@@ -1057,6 +1133,10 @@ export default function Home() {
             engineInstance.setRollInput(rollInput);
             engineInstance.setYawInput(yawInput);
             engineInstance.setThrottle(throttleRef.current);
+            engineInstance.setWind(
+              weatherRef.current.windEastKnots,
+              weatherRef.current.windNorthKnots,
+            );
             if (missileLaunchRequestedRef.current) {
               missileLaunchRequestedRef.current = false;
               const selectedTargetId = primaryTargetIdRef.current;
@@ -1434,6 +1514,54 @@ export default function Home() {
     terrainOrigin,
   ]);
 
+  // REAL weather is fetched locally for the aircraft's current coordinates.
+  useEffect(() => {
+    if (!simulationStarted || weatherPreset !== 'real') return;
+
+    let cancelled = false;
+    let requestPending = false;
+    let activeController: AbortController | null = null;
+    const updateWeather = async (): Promise<void> => {
+      if (requestPending) return;
+      requestPending = true;
+      const controller = new AbortController();
+      activeController = controller;
+      const position = latestPositionRef.current;
+      const location = getAircraftCoordinates(terrainOrigin, position.posX, position.posZ);
+      setWeatherStatus('REAL weather · fetching aircraft location…');
+
+      try {
+        const currentWeather = await fetchCurrentWeather(
+          location.latitude,
+          location.longitude,
+          controller.signal,
+        );
+        if (cancelled) return;
+        weatherRef.current = currentWeather;
+        setWeather(currentWeather);
+        setWeatherStatus(`REAL weather · updated ${new Date().toLocaleTimeString()}`);
+      } catch (error) {
+        if (cancelled || (error instanceof DOMException && error.name === 'AbortError')) return;
+        const message = error instanceof Error ? error.message : String(error);
+        setWeatherStatus(`REAL weather unavailable: ${message}; retrying in one minute.`);
+      } finally {
+        if (activeController === controller) activeController = null;
+        requestPending = false;
+      }
+    };
+
+    void updateWeather();
+    const intervalId = window.setInterval(
+      () => void updateWeather(),
+      REAL_WEATHER_POLL_INTERVAL_MS,
+    );
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      activeController?.abort();
+    };
+  }, [simulationStarted, terrainOrigin, weatherPreset]);
+
   // Advances the local clock unless a connected host controls joiner time.
   useEffect(() => {
     if (!simulationStarted) return;
@@ -1520,11 +1648,14 @@ export default function Home() {
         remoteDescription={remoteDescription}
         latitude={latitudeInput}
         longitude={longitudeInput}
+        weatherPreset={weatherPreset}
+        weatherLabel={weatherPreset === 'real' ? 'Open-Meteo weather in flight' : weather.label}
         initialTime={initialTimeInput}
         adsbApiKey={adsbApiKey}
         rememberAdsbApiKey={rememberAdsbApiKey}
         adsbKeyStorageError={adsbKeyStorageError}
         timeControlledByHost={multiplayerRole === 'join'}
+        weatherControlledByHost={multiplayerRole === 'join'}
         error={setupError}
         onMultiplayerRoleChange={handleMultiplayerRoleChange}
         onCreateOffer={handleCreateOffer}
@@ -1534,6 +1665,7 @@ export default function Home() {
         onRemoteDescriptionChange={setRemoteDescription}
         onLatitudeChange={setLatitudeInput}
         onLongitudeChange={setLongitudeInput}
+        onWeatherPresetChange={handleWeatherPresetChange}
         onInitialTimeChange={handleInitialTimeChange}
         onAdsbApiKeyChange={handleAdsbApiKeyChange}
         onRememberAdsbApiKeyChange={handleRememberAdsbApiKeyChange}
@@ -1570,6 +1702,7 @@ export default function Home() {
             terrainOrigin={terrainOrigin}
             terrainGrid={terrainGrid}
             terrainStatus={terrainStatus}
+            weather={weather}
             simulationTimeMinutes={simulationTimeMinutes}
           />
         </div>
@@ -1630,6 +1763,19 @@ export default function Home() {
               END FLIGHT
             </button>
           </div>
+          {weatherStatus && (
+            <p
+              role={weatherStatus.startsWith('REAL weather unavailable:') ? 'alert' : 'status'}
+              aria-live={weatherStatus.startsWith('REAL weather unavailable:') ? 'assertive' : 'polite'}
+              className={`mt-3 rounded border px-3 py-2 text-right text-xs ${
+                weatherStatus.startsWith('REAL weather unavailable:')
+                  ? 'border-red-500/60 bg-red-950/85 text-red-300'
+                  : 'border-zinc-800 bg-zinc-900/80 text-sky-200'
+              }`}
+            >
+              {weatherStatus}
+            </p>
+          )}
           {(status ||
             (multiplayerRole !== 'solo' && multiplayerStatus) ||
             adsbStatus ||
