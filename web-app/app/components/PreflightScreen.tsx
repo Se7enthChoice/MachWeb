@@ -27,7 +27,6 @@ interface PreflightScreenProps {
   adsbApiKey: string;
   rememberAdsbApiKey: boolean;
   adsbKeyStorageError: string;
-  timeControlledByHost: boolean;
   error: string;
   onMultiplayerRoleChange(role: 'solo' | 'host' | 'join'): void;
   onCreateOffer(): void;
@@ -61,7 +60,6 @@ export default function PreflightScreen({
   adsbApiKey,
   rememberAdsbApiKey,
   adsbKeyStorageError,
-  timeControlledByHost,
   error,
   onMultiplayerRoleChange,
   onCreateOffer,
@@ -145,50 +143,58 @@ export default function PreflightScreen({
             </p>
           </div>
 
-          <div className="space-y-3 border-t border-zinc-800 pt-5">
-            <label className="flex max-w-xl flex-col gap-2 text-xs font-bold tracking-wider text-zinc-400">
-              WEATHER
-              <select
-                value={weatherPreset}
-                onChange={event => onWeatherPresetChange(event.target.value as WeatherPreset)}
-                aria-label="Flight weather"
-                className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-3 text-base font-normal tracking-normal text-zinc-100 outline-none transition focus:border-emerald-500"
-              >
-                <option value="sun">SUN</option>
-                <option value="rain">RAIN</option>
-                <option value="snow">SNOW</option>
-                <option value="storm">LIGHTNING STORM</option>
-                <option value="real">REAL</option>
-              </select>
-            </label>
-            <p className="text-xs leading-5 text-zinc-500">
-              SUN, RAIN, SNOW, and LIGHTNING STORM are local presets. REAL fetches keyless
-              Open-Meteo conditions for the aircraft&apos;s current location at takeoff and every
-              minute. Wind, clouds, precipitation, visibility, and lightning apply locally
-              in each client.
-              {weatherPreset !== 'real' && ` Selected: ${weatherLabel}.`}
-            </p>
-          </div>
+          {multiplayerRole === 'join' ? (
+            <div className="border-t border-zinc-800 pt-5">
+              <p className="text-xs leading-5 text-zinc-500">
+                The host controls the weather and time of day for the shared flight. REAL weather,
+                if selected by the host, is still fetched locally for your aircraft.
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="space-y-3 border-t border-zinc-800 pt-5">
+                <label className="flex max-w-xl flex-col gap-2 text-xs font-bold tracking-wider text-zinc-400">
+                  WEATHER
+                  <select
+                    value={weatherPreset}
+                    onChange={event => onWeatherPresetChange(event.target.value as WeatherPreset)}
+                    aria-label="Flight weather"
+                    className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-3 text-base font-normal tracking-normal text-zinc-100 outline-none transition focus:border-emerald-500"
+                  >
+                    <option value="sun">SUN</option>
+                    <option value="rain">RAIN</option>
+                    <option value="snow">SNOW</option>
+                    <option value="storm">LIGHTNING STORM</option>
+                    <option value="real">REAL</option>
+                  </select>
+                </label>
+                <p className="text-xs leading-5 text-zinc-500">
+                  SUN, RAIN, SNOW, and LIGHTNING STORM are local presets. REAL fetches keyless
+                  Open-Meteo conditions for the aircraft&apos;s current location at takeoff and every
+                  minute. Wind, clouds, precipitation, visibility, and lightning apply locally
+                  in each client.
+                  {weatherPreset !== 'real' && ` Selected: ${weatherLabel}.`}
+                </p>
+              </div>
 
-          <div className="border-t border-zinc-800 pt-5">
-            <label className="flex max-w-sm flex-col gap-2 text-xs font-bold tracking-wider text-zinc-400">
-              INITIAL TIME OF DAY
-              <input
-                type="time"
-                required
-                value={initialTime}
-                onChange={handleInitialTimeChange}
-                disabled={timeControlledByHost}
-                aria-label="Initial time of day"
-                className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-3 text-base font-normal tracking-normal text-zinc-100 outline-none transition focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
-              />
-            </label>
-            <p className="mt-2 text-xs text-zinc-500">
-              {timeControlledByHost
-                ? 'The host controls the shared time of day.'
-                : 'The 24-hour day/night cycle starts at this time and advances in real time.'}
-            </p>
-          </div>
+              <div className="border-t border-zinc-800 pt-5">
+                <label className="flex max-w-sm flex-col gap-2 text-xs font-bold tracking-wider text-zinc-400">
+                  INITIAL TIME OF DAY
+                  <input
+                    type="time"
+                    required
+                    value={initialTime}
+                    onChange={handleInitialTimeChange}
+                    aria-label="Initial time of day"
+                    className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-3 text-base font-normal tracking-normal text-zinc-100 outline-none transition focus:border-emerald-500"
+                  />
+                </label>
+                <p className="mt-2 text-xs text-zinc-500">
+                  The 24-hour day/night cycle starts at this time and advances in real time.
+                </p>
+              </div>
+            </>
+          )}
 
           <div className="space-y-4 border-t border-zinc-800 pt-5">
             <div>

@@ -714,6 +714,7 @@ export default function Home() {
 
   // Updates the selected time and immediately syncs valid host changes to joiners.
   const handleInitialTimeChange = (value: string): void => {
+    if (multiplayerRole === 'join') return;
     setInitialTimeInput(value);
     if (multiplayerRole !== 'host' || !/^\d{2}:\d{2}$/.test(value)) return;
     const [hours, minutes] = value.split(':').map(Number);
@@ -1683,8 +1684,6 @@ export default function Home() {
         adsbApiKey={adsbApiKey}
         rememberAdsbApiKey={rememberAdsbApiKey}
         adsbKeyStorageError={adsbKeyStorageError}
-        timeControlledByHost={multiplayerRole === 'join'}
-        weatherControlledByHost={multiplayerRole === 'join'}
         error={setupError}
         onMultiplayerRoleChange={handleMultiplayerRoleChange}
         onCreateOffer={handleCreateOffer}
