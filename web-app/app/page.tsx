@@ -380,6 +380,9 @@ export default function Home() {
   const playerIdRef = useRef('');
   const telemetrySequenceRef = useRef(0);
   const remoteTelemetriesRef = useRef<FlightTelemetry[]>([]);
+  // Newest snapshot per peer; React state only tracks which peers exist, not every packet.
+  const remotePlayersRef = useRef<Record<string, FlightTelemetry>>({});
+  const adsbTelemetriesRef = useRef<FlightTelemetry[]>([]);
   const remoteTelemetryReceivedAtRef = useRef(new Map<string, number>());
   const remoteTelemetrySamplesRef = useRef(new Map<string, ReceivedFlightTelemetry[]>());
   const localPoseRef = useRef<LocalPose | null>(null);
@@ -521,6 +524,7 @@ export default function Home() {
     peerPlayersRef.current.clear();
     remoteTelemetryReceivedAtRef.current.clear();
     remoteTelemetrySamplesRef.current.clear();
+    remotePlayersRef.current = {};
     radarTargetIdsRef.current.clear();
     radarTargetPlayerIdsRef.current.clear();
     radarTargetKindsRef.current.clear();
@@ -605,15 +609,16 @@ export default function Home() {
       peerConnectionsRef.current.delete(sessionId);
       const playerIds = peerPlayersRef.current.get(sessionId) ?? new Set<string>();
       peerPlayersRef.current.delete(sessionId);
-      setRemoteTelemetryByPlayer(current => {
-        const next = { ...current };
-        playerIds.forEach(playerId => {
-          delete next[playerId];
-          remoteTelemetryReceivedAtRef.current.delete(playerId);
-          remoteTelemetrySamplesRef.current.delete(playerId);
-        });
-        return next;
+      playerIds.forEach(playerId => {
+        delete remotePlayersRef.current[playerId];
+        remoteTelemetryReceivedAtRef.current.delete(playerId);
+        remoteTelemetrySamplesRef.current.delete(playerId);
       });
+      remoteTelemetriesRef.current = [
+        ...Object.values(remotePlayersRef.current),
+        ...adsbTelemetriesRef.current,
+      ];
+      setRemoteTelemetryByPlayer({ ...remotePlayersRef.current });
       setHostPeerSessions(sessions =>
         sessions.map(session =>
           session.id === sessionId ? { ...session, status: 'disconnected' } : session,
@@ -688,10 +693,14 @@ export default function Home() {
         receivedSamples.splice(0, receivedSamples.length - MAX_RECEIVED_TELEMETRY_SAMPLES);
       }
       remoteTelemetrySamplesRef.current.set(telemetry.playerId, receivedSamples);
-      setRemoteTelemetryByPlayer(current => ({
-        ...current,
-        [telemetry.playerId]: telemetry,
-      }));
+      // Only a new peer needs a React update; later packets reach consumers through refs.
+      const isNewPlayer = !(telemetry.playerId in remotePlayersRef.current);
+      remotePlayersRef.current[telemetry.playerId] = telemetry;
+      remoteTelemetriesRef.current = [
+        ...Object.values(remotePlayersRef.current),
+        ...adsbTelemetriesRef.current,
+      ];
+      if (isNewPlayer) setRemoteTelemetryByPlayer({ ...remotePlayersRef.current });
 
       if (role === 'host') {
         for (const [otherSessionId, otherChannel] of dataChannelsRef.current) {
@@ -1477,8 +1486,12 @@ export default function Home() {
 
   // Keeps radar and visual targets aligned with the latest peer and ADS-B telemetry.
   useEffect(() => {
-    remoteTelemetriesRef.current = remoteTelemetries;
-  }, [remoteTelemetries]);
+    adsbTelemetriesRef.current = adsbTelemetries;
+    remoteTelemetriesRef.current = [
+      ...Object.values(remotePlayersRef.current),
+      ...adsbTelemetries,
+    ];
+  }, [adsbTelemetries, remoteTelemetries]);
 
   useEffect(() => {
     radarContactsRef.current = radarContacts;

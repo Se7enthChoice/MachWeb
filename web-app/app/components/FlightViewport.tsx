@@ -1155,6 +1155,71 @@ export default function FlightViewport({
     let animId: number;
     let previousFrameTime = performance.now();
     const adsbTargetPosition = new THREE.Vector3();
+    // Mirrors one peer packet's missiles into scene objects using the packet's arrival time.
+    const ingestRemoteMissiles = (
+      ownerId: string,
+      missiles: NonNullable<FlightTelemetry['missiles']>,
+      receivedAt: number,
+    ) => {
+      if (ownerId === localPlayerIdRef.current) return;
+      const activeKeys = new Set<string>();
+      for (const missile of missiles) {
+        const key = `${ownerId}:${missile.missileId}`;
+        const position = getLocalPosition(terrainOriginRef.current, missile);
+        const worldPosition = new THREE.Vector3(
+          position.posXFeet * visualScale,
+          missile.altitude * visualScale,
+          position.posZFeet * visualScale,
+        );
+        if (missile.exploded) {
+          if (!seenExplosions.has(key)) {
+            seenExplosions.set(key, receivedAt);
+            explosionEffects.push(createExplosion(scene, worldPosition));
+          }
+          continue;
+        }
+
+        activeKeys.add(key);
+        const sample: MissileVisualSample = {
+          position: worldPosition,
+          heading: missile.heading,
+          pitch: missile.pitch,
+          receivedAt,
+        };
+        const instance = missileInstances.get(key);
+        if (!instance) {
+          const model = createMissile();
+          model.position.copy(worldPosition);
+          model.rotation.order = 'YXZ';
+          model.rotation.y = -THREE.MathUtils.degToRad(missile.heading);
+          model.rotation.x = THREE.MathUtils.degToRad(missile.pitch);
+          scene.add(model);
+          missileInstances.set(key, { model, samples: [sample], locallySimulated: false });
+        } else {
+          const lastSample = instance.samples[instance.samples.length - 1];
+          if (receivedAt > lastSample.receivedAt) instance.samples.push(sample);
+          if (instance.samples.length > MAX_REMOTE_SAMPLES) {
+            instance.samples.splice(0, instance.samples.length - MAX_REMOTE_SAMPLES);
+          }
+        }
+      }
+
+      // A missile absent from its owner's newest packet has exploded or expired.
+      for (const [key, instance] of missileInstances) {
+        if (
+          instance.locallySimulated ||
+          activeKeys.has(key) ||
+          key.slice(0, key.lastIndexOf(':')) !== ownerId
+        ) {
+          continue;
+        }
+        disposeMissile(scene, instance.model);
+        missileInstances.delete(key);
+      }
+      seenExplosions.forEach((time, key) => {
+        if (receivedAt - time > 10_000) seenExplosions.delete(key);
+      });
+    };
     // Interpolates remote traffic and updates time-dependent lighting each frame.
     const animate = (frameTime?: number) => {
       animId = requestAnimationFrame(animate);
@@ -1305,6 +1370,7 @@ export default function FlightViewport({
         for (const received of receivedSamples) {
           if (received.telemetry.sequence <= instance.lastSequence) continue;
           ingestRemoteSample(instance, received, terrainOriginRef.current);
+          ingestRemoteMissiles(playerId, received.telemetry.missiles ?? [], received.receivedAt);
         }
         receivedSamples.length = 0;
       }
@@ -2065,80 +2131,17 @@ export default function FlightViewport({
     }
   }, [remoteTelemetries, terrainOrigin]);
 
-  // Synchronizes local and relayed missile snapshots into shared scene objects.
+  // Peer missiles are ingested per packet in the render loop; this only drops those of departed peers.
   useEffect(() => {
     const scene = sceneRef.current;
     if (!scene) return;
-    const snapshots = [
-      ...remoteTelemetries.flatMap(telemetry =>
-        (telemetry.missiles ?? []).map(missile => ({
-          ...missile,
-          ownerId: telemetry.playerId,
-        })),
-      ),
-    ];
-    const activeKeys = new Set<string>();
-
-    for (const missile of snapshots) {
-      if (missile.ownerId === localPlayerIdRef.current) continue;
-      const key = `${missile.ownerId}:${missile.missileId}`;
-      const position = getLocalPosition(terrainOrigin, missile);
-      const worldPosition = new THREE.Vector3(
-        position.posXFeet * visualScale,
-        missile.altitude * visualScale,
-        position.posZFeet * visualScale,
-      );
-      if (missile.exploded) {
-        if (!seenExplosionsRef.current.has(key)) {
-          seenExplosionsRef.current.set(key, performance.now());
-          explosionEffectsRef.current.push(createExplosion(scene, worldPosition));
-        }
-        const existing = missileInstancesRef.current.get(key);
-        if (existing) {
-          disposeMissile(scene, existing.model);
-          missileInstancesRef.current.delete(key);
-        }
-        continue;
-      }
-
-      activeKeys.add(key);
-      let instance = missileInstancesRef.current.get(key);
-      const receivedAt = performance.now();
-      const sample: MissileVisualSample = {
-        position: worldPosition,
-        heading: missile.heading,
-        pitch: missile.pitch,
-        receivedAt,
-      };
-      if (!instance) {
-        const model = createMissile();
-        model.position.copy(worldPosition);
-        model.rotation.order = 'YXZ';
-        model.rotation.y = -THREE.MathUtils.degToRad(missile.heading);
-        model.rotation.x = THREE.MathUtils.degToRad(missile.pitch);
-        scene.add(model);
-        instance = { model, samples: [sample], locallySimulated: false };
-        missileInstancesRef.current.set(key, instance);
-      } else {
-        const lastSample = instance.samples[instance.samples.length - 1];
-        if (receivedAt > lastSample.receivedAt) instance.samples.push(sample);
-        if (instance.samples.length > MAX_REMOTE_SAMPLES) {
-          instance.samples.splice(0, instance.samples.length - MAX_REMOTE_SAMPLES);
-        }
-      }
-    }
-
+    const ownerIds = new Set(remoteTelemetries.map(telemetry => telemetry.playerId));
     for (const [key, instance] of missileInstancesRef.current) {
-      if (instance.locallySimulated || activeKeys.has(key)) continue;
+      if (instance.locallySimulated || ownerIds.has(key.slice(0, key.lastIndexOf(':')))) continue;
       disposeMissile(scene, instance.model);
       missileInstancesRef.current.delete(key);
     }
-
-    const now = performance.now();
-    seenExplosionsRef.current.forEach((time, key) => {
-      if (now - time > 10_000) seenExplosionsRef.current.delete(key);
-    });
-  }, [localPlayerId, remoteTelemetries, terrainOrigin]);
+  }, [remoteTelemetries]);
 
   const imageryStatus =
     terrainGrid && imageryProgress?.grid === terrainGrid

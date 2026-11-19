@@ -98,39 +98,31 @@ int MissileSystem::launch(
     const int missileIndex = findAvailableMissile();
     if (missileIndex < 0) return 3;
 
+    // Only an explicitly selected track guides a missile; no selection fires it unguided.
     std::uint32_t targetId = 0;
-    float nearestRangeNm = type->maxRangeNm;
-    bool hasTrack = false;
-    bool selectedTrackFound = false;
-    bool hasCurrentTargetPosition = false;
-    bool selectedTargetPositionFound = false;
-    for (int index = 0; index < radar.getContactCount(); ++index) {
-        const std::uint32_t candidateId = radar.getContactTargetId(index);
-        if (selectedTargetId != 0 && candidateId != selectedTargetId) continue;
-        hasTrack = true;
-        selectedTrackFound = selectedTargetId == 0 || candidateId == selectedTargetId;
-        float targetX = 0.0f;
-        float targetAltitude = 0.0f;
-        float targetZ = 0.0f;
-        if (!radar.getTargetPosition(candidateId, targetX, targetAltitude, targetZ)) continue;
-        hasCurrentTargetPosition = true;
-        if (candidateId == selectedTargetId) selectedTargetPositionFound = true;
-        const float deltaX = targetX - posX;
-        const float deltaAltitude = targetAltitude - altitude;
-        const float deltaZ = targetZ - posZ;
-        const float rangeNm = std::sqrt(
-            deltaX * deltaX + deltaAltitude * deltaAltitude + deltaZ * deltaZ) /
-            FT_per_NM;
-        if (rangeNm <= nearestRangeNm) {
-            nearestRangeNm = rangeNm;
-            targetId = candidateId;
+    if (selectedTargetId != 0) {
+        bool selectedTrackFound = false;
+        bool selectedTargetPositionFound = false;
+        for (int index = 0; index < radar.getContactCount(); ++index) {
+            const std::uint32_t candidateId = radar.getContactTargetId(index);
+            if (candidateId != selectedTargetId) continue;
+            selectedTrackFound = true;
+            float targetX = 0.0f;
+            float targetAltitude = 0.0f;
+            float targetZ = 0.0f;
+            if (!radar.getTargetPosition(candidateId, targetX, targetAltitude, targetZ)) break;
+            selectedTargetPositionFound = true;
+            const float deltaX = targetX - posX;
+            const float deltaAltitude = targetAltitude - altitude;
+            const float deltaZ = targetZ - posZ;
+            const float rangeNm = std::sqrt(
+                deltaX * deltaX + deltaAltitude * deltaAltitude + deltaZ * deltaZ) /
+                FT_per_NM;
+            if (rangeNm <= type->maxRangeNm) targetId = candidateId;
+            break;
         }
-        if (selectedTargetId != 0) break;
-    }
-    if (selectedTargetId != 0 && !selectedTrackFound) return 4;
-    if (selectedTargetId != 0 && !selectedTargetPositionFound) return 4;
-    if (type->radarGuided && hasTrack && targetId == 0) {
-        return hasCurrentTargetPosition ? 5 : 4;
+        if (!selectedTrackFound || !selectedTargetPositionFound) return 4;
+        if (targetId == 0) return 5;
     }
 
     Vector3 forward;
