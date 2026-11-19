@@ -91,6 +91,7 @@ interface MissileVisualSample {
   heading: number;
   pitch: number;
   receivedAt: number;
+  timelineAt: number;
 }
 
 interface MissileVisualInstance {
@@ -133,9 +134,8 @@ const REMOTE_CLOCK_WINDOW_SAMPLES = 150;
 const MAX_REMOTE_EXTRAPOLATION_MS = 120;
 const ADSB_INTERPOLATION_DELAY_MS = ADSB_POLL_INTERVAL_MS * 1.25;
 const ADSB_VISUAL_SMOOTHING_SECONDS = 0.35;
-const REMOTE_MISSILE_INTERPOLATION_DELAY_MS = 50;
 const MAX_MISSILE_EXTRAPOLATION_MS = 200;
-const MISSILE_VISUAL_SMOOTHING_SECONDS = 0.035;
+const MISSILE_ROTATION_SMOOTHING_SECONDS = 0.035;
 const MAX_REMOTE_SAMPLES = 20;
 const REMOTE_AIRCRAFT_COLORS = [0x38bdf8, 0xfbbf24, 0xf472b6, 0xa3e635, 0xc084fc];
 const TERRAIN_MESH_SEGMENTS = 64;
@@ -445,6 +445,38 @@ function interpolateAngle(start: number, end: number, amount: number): number {
 function smoothAngle(current: number, target: number, amount: number): number {
   const delta = Math.atan2(Math.sin(target - current), Math.cos(target - current));
   return current + delta * amount;
+}
+
+function interpolateMissileCoordinate(
+  start: number,
+  end: number,
+  previous: number | undefined,
+  next: number | undefined,
+  previousTime: number | undefined,
+  startTime: number,
+  endTime: number,
+  nextTime: number | undefined,
+  amount: number,
+): number {
+  const interval = endTime - startTime;
+  const secant = end - start;
+  const startTangent =
+    previous === undefined || previousTime === undefined
+      ? secant
+      : ((end - previous) / (endTime - previousTime)) * interval;
+  const endTangent =
+    next === undefined || nextTime === undefined
+      ? secant
+      : ((next - start) / (nextTime - startTime)) * interval;
+  const amountSquared = amount * amount;
+  const amountCubed = amountSquared * amount;
+
+  return (
+    (2 * amountCubed - 3 * amountSquared + 1) * start +
+    (amountCubed - 2 * amountSquared + amount) * startTangent +
+    (-2 * amountCubed + 3 * amountSquared) * end +
+    (amountCubed - amountSquared) * endTangent
+  );
 }
 
 // Adds one received player snapshot to an aircraft's timeline, using sender sample times so
@@ -1155,11 +1187,12 @@ export default function FlightViewport({
     let animId: number;
     let previousFrameTime = performance.now();
     const adsbTargetPosition = new THREE.Vector3();
-    // Mirrors one peer packet's missiles into scene objects using the packet's arrival time.
+    // Mirrors one peer packet's missiles onto the owning aircraft's synchronized timeline.
     const ingestRemoteMissiles = (
       ownerId: string,
       missiles: NonNullable<FlightTelemetry['missiles']>,
       receivedAt: number,
+      timelineAt: number,
     ) => {
       if (ownerId === localPlayerIdRef.current) return;
       const activeKeys = new Set<string>();
@@ -1185,6 +1218,7 @@ export default function FlightViewport({
           heading: missile.heading,
           pitch: missile.pitch,
           receivedAt,
+          timelineAt,
         };
         const instance = missileInstances.get(key);
         if (!instance) {
@@ -1356,13 +1390,12 @@ export default function FlightViewport({
         camera.position.z - 140,
       );
 
-      const missileSmoothing = 1 - Math.exp(
-        -frameSeconds / MISSILE_VISUAL_SMOOTHING_SECONDS,
+      const missileRotationSmoothing = 1 - Math.exp(
+        -frameSeconds / MISSILE_ROTATION_SMOOTHING_SECONDS,
       );
       const adsbSmoothing = 1 - Math.exp(
         -frameSeconds / ADSB_VISUAL_SMOOTHING_SECONDS,
       );
-      const missileRenderTime = now - REMOTE_MISSILE_INTERPOLATION_DELAY_MS;
       for (const [playerId, receivedSamples] of remoteTelemetrySamplesRef.current) {
         if (receivedSamples.length === 0) continue;
         const instance = remoteAircrafts.get(playerId);
@@ -1370,7 +1403,12 @@ export default function FlightViewport({
         for (const received of receivedSamples) {
           if (received.telemetry.sequence <= instance.lastSequence) continue;
           ingestRemoteSample(instance, received, terrainOriginRef.current);
-          ingestRemoteMissiles(playerId, received.telemetry.missiles ?? [], received.receivedAt);
+          ingestRemoteMissiles(
+            playerId,
+            received.telemetry.missiles ?? [],
+            received.receivedAt,
+            instance.samples[instance.samples.length - 1].timelineAt,
+          );
         }
         receivedSamples.length = 0;
       }
@@ -1488,31 +1526,77 @@ export default function FlightViewport({
           missile.model.rotation.x = THREE.MathUtils.degToRad(sample.pitch);
           continue;
         }
+        const missileRenderTime = remote?.lastRenderTime ??
+          now - (remote?.delayMs ?? REMOTE_MAX_DELAY_MS);
+        let firstIndex = 0;
         while (
-          missile.samples.length > 2 &&
-          missile.samples[1].receivedAt <= missileRenderTime
+          firstIndex + 1 < missile.samples.length &&
+          missile.samples[firstIndex + 1].timelineAt <= missileRenderTime
         ) {
-          missile.samples.shift();
+          firstIndex += 1;
         }
-        const first = missile.samples[0];
-        const second = missile.samples[1];
-        const interval = second ? second.receivedAt - first.receivedAt : 0;
+        if (firstIndex >= missile.samples.length - 1 && missile.samples.length > 1) {
+          firstIndex = missile.samples.length - 2;
+        }
+        if (firstIndex > 1) {
+          missile.samples.splice(0, firstIndex - 1);
+          firstIndex = 1;
+        }
+        const previous = firstIndex > 0 ? missile.samples[firstIndex - 1] : undefined;
+        const first = missile.samples[firstIndex];
+        const second = missile.samples[firstIndex + 1];
+        const next = missile.samples[firstIndex + 2];
+        const interval = second ? second.timelineAt - first.timelineAt : 0;
         const amount = interval > 0
           ? THREE.MathUtils.clamp(
-              (missileRenderTime - first.receivedAt) / interval,
+              (missileRenderTime - first.timelineAt) / interval,
               0,
               1,
             )
           : 0;
-        missileTargetPosition.lerpVectors(
-          first.position,
-          second?.position ?? first.position,
-          amount,
-        );
-        if (second && interval > 0 && missileRenderTime > second.receivedAt) {
+        if (second && interval > 0) {
+          missileTargetPosition.set(
+            interpolateMissileCoordinate(
+              first.position.x,
+              second.position.x,
+              previous?.position.x,
+              next?.position.x,
+              previous?.timelineAt,
+              first.timelineAt,
+              second.timelineAt,
+              next?.timelineAt,
+              amount,
+            ),
+            interpolateMissileCoordinate(
+              first.position.y,
+              second.position.y,
+              previous?.position.y,
+              next?.position.y,
+              previous?.timelineAt,
+              first.timelineAt,
+              second.timelineAt,
+              next?.timelineAt,
+              amount,
+            ),
+            interpolateMissileCoordinate(
+              first.position.z,
+              second.position.z,
+              previous?.position.z,
+              next?.position.z,
+              previous?.timelineAt,
+              first.timelineAt,
+              second.timelineAt,
+              next?.timelineAt,
+              amount,
+            ),
+          );
+        } else {
+          missileTargetPosition.copy(first.position);
+        }
+        if (second && interval > 0 && missileRenderTime > second.timelineAt) {
           // Dead-reckon briefly through delayed packets instead of freezing, then jumping.
           const extrapolationMs = Math.min(
-            missileRenderTime - second.receivedAt,
+            missileRenderTime - second.timelineAt,
             MAX_MISSILE_EXTRAPOLATION_MS,
           );
           const extrapolationRatio = extrapolationMs / interval;
@@ -1523,7 +1607,7 @@ export default function FlightViewport({
           missileTargetPosition.z +=
             (second.position.z - first.position.z) * extrapolationRatio;
         }
-        missile.model.position.lerp(missileTargetPosition, missileSmoothing);
+        missile.model.position.copy(missileTargetPosition);
         missile.model.rotation.order = 'YXZ';
         const targetHeading = -THREE.MathUtils.degToRad(
           interpolateAngle(first.heading, second?.heading ?? first.heading, amount),
@@ -1531,7 +1615,7 @@ export default function FlightViewport({
         missile.model.rotation.y = smoothAngle(
           missile.model.rotation.y,
           targetHeading,
-          missileSmoothing,
+          missileRotationSmoothing,
         );
         const targetPitch = THREE.MathUtils.degToRad(
           THREE.MathUtils.lerp(first.pitch, second?.pitch ?? first.pitch, amount),
@@ -1539,7 +1623,7 @@ export default function FlightViewport({
         missile.model.rotation.x = THREE.MathUtils.lerp(
           missile.model.rotation.x,
           targetPitch,
-          missileSmoothing,
+          missileRotationSmoothing,
         );
       }
 
@@ -1557,6 +1641,7 @@ export default function FlightViewport({
           heading: missile.heading,
           pitch: missile.pitch,
           receivedAt: now,
+          timelineAt: now,
         };
         if (missile.exploded) {
           if (!seenExplosions.has(key)) {
@@ -1584,6 +1669,10 @@ export default function FlightViewport({
           missileInstances.set(key, instance);
         } else {
           instance.samples[0] = sample;
+          instance.model.position.copy(sample.position);
+          instance.model.rotation.order = 'YXZ';
+          instance.model.rotation.y = -THREE.MathUtils.degToRad(sample.heading);
+          instance.model.rotation.x = THREE.MathUtils.degToRad(sample.pitch);
         }
       }
 
