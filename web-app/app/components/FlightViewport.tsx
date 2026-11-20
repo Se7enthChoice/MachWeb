@@ -174,6 +174,11 @@ const CELESTIAL_DISTANCE = 1800;
 const LIGHT_DISTANCE = 1600;
 const FOG_NEAR = 300;
 const FOG_FAR = 1100;
+// Three.js measures fog by view-space depth (a planar cutoff); use Euclidean distance from the camera instead.
+THREE.ShaderChunk.fog_vertex = THREE.ShaderChunk.fog_vertex.replace(
+  'vFogDepth = - mvPosition.z;',
+  'vFogDepth = length(mvPosition.xyz);',
+);
 const NIGHT_SKY = new THREE.Color(0x071225);
 const TWILIGHT_SKY = new THREE.Color(0xe59a72);
 const DAY_SKY = new THREE.Color(0x79b9dc);
