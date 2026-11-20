@@ -21,6 +21,8 @@ interface PreflightScreenProps {
   hostPeerSessions: HostPeerSession[];
   latitude: string;
   longitude: string;
+  startingAltitude: string;
+  startingHeading: string;
   weatherPreset: WeatherPreset;
   weatherLabel: string;
   initialTime: string;
@@ -36,6 +38,8 @@ interface PreflightScreenProps {
   onRemoteDescriptionChange(value: string): void;
   onLatitudeChange(value: string): void;
   onLongitudeChange(value: string): void;
+  onStartingAltitudeChange(value: string): void;
+  onStartingHeadingChange(value: string): void;
   onWeatherPresetChange(value: WeatherPreset): void;
   onInitialTimeChange(value: string): void;
   onAdsbApiKeyChange(value: string): void;
@@ -54,6 +58,8 @@ export default function PreflightScreen({
   hostPeerSessions,
   latitude,
   longitude,
+  startingAltitude,
+  startingHeading,
   weatherPreset,
   weatherLabel,
   initialTime,
@@ -69,6 +75,8 @@ export default function PreflightScreen({
   onRemoteDescriptionChange,
   onLatitudeChange,
   onLongitudeChange,
+  onStartingAltitudeChange,
+  onStartingHeadingChange,
   onWeatherPresetChange,
   onInitialTimeChange,
   onAdsbApiKeyChange,
@@ -82,6 +90,14 @@ export default function PreflightScreen({
 
   const handleLongitudeChange = (event: ChangeEvent<HTMLInputElement>) => {
     onLongitudeChange(event.target.value);
+  };
+
+  const handleStartingAltitudeChange = (event: ChangeEvent<HTMLInputElement>) => {
+    onStartingAltitudeChange(event.target.value);
+  };
+
+  const handleStartingHeadingChange = (event: ChangeEvent<HTMLInputElement>) => {
+    onStartingHeadingChange(event.target.value);
   };
 
   const handleInitialTimeChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -138,8 +154,38 @@ export default function PreflightScreen({
                 />
               </label>
             </div>
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <label className="flex flex-col gap-2 text-xs font-bold tracking-wider text-zinc-400">
+                STARTING ALTITUDE (FT MSL)
+                <input
+                  type="number"
+                  min="0"
+                  max="60000"
+                  step="1"
+                  required
+                  value={startingAltitude}
+                  onChange={handleStartingAltitudeChange}
+                  aria-label="Starting altitude in feet"
+                  className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-3 text-base font-normal tracking-normal text-zinc-100 outline-none transition focus:border-emerald-500"
+                />
+              </label>
+              <label className="flex flex-col gap-2 text-xs font-bold tracking-wider text-zinc-400">
+                STARTING HEADING (DEGREES)
+                <input
+                  type="number"
+                  min="0"
+                  max="359"
+                  step="1"
+                  required
+                  value={startingHeading}
+                  onChange={handleStartingHeadingChange}
+                  aria-label="Starting heading in degrees"
+                  className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-3 text-base font-normal tracking-normal text-zinc-100 outline-none transition focus:border-emerald-500"
+                />
+              </label>
+            </div>
             <p className="mt-3 text-xs text-zinc-500">
-              Enter coordinates to select starting location. Your start location is locked for the duration of each flight.
+              Enter coordinates, altitude, and heading to set your starting conditions. They are locked for the duration of each flight.
             </p>
           </div>
 

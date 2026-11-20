@@ -47,6 +47,7 @@ import type { LocalPose } from './components/FlightViewport';
 
 interface SimEngineInstance {
   tick(dt: number): void;
+  setInitialConditions(altitude: number, heading: number): void;
   setPitchInput(value: number): void;
   setRollInput(value: number): void;
   setYawInput(value: number): void;
@@ -274,6 +275,8 @@ export default function Home() {
   // Preflight selections and the terrain currently loaded into the simulation.
   const [latitudeInput, setLatitudeInput] = useState(String(DEFAULT_LATITUDE));
   const [longitudeInput, setLongitudeInput] = useState(String(DEFAULT_LONGITUDE));
+  const [startingAltitudeInput, setStartingAltitudeInput] = useState('5000');
+  const [startingHeadingInput, setStartingHeadingInput] = useState('0');
   const [initialTimeInput, setInitialTimeInput] = useState('');
   const [flightStartTimeMinutes, setFlightStartTimeMinutes] = useState(0);
   const [simulationTimeMinutes, setSimulationTimeMinutes] = useState(0);
@@ -963,6 +966,8 @@ export default function Home() {
 
     const latitude = Number(latitudeInput);
     const longitude = Number(longitudeInput);
+    const startingAltitude = Number(startingAltitudeInput);
+    const startingHeading = Number(startingHeadingInput);
     const timeParts = initialTimeInput.split(':').map(Number);
     if (
       !Number.isFinite(latitude) ||
@@ -971,6 +976,12 @@ export default function Home() {
       !Number.isFinite(longitude) ||
       longitude < -180 ||
       longitude > 180 ||
+      !Number.isFinite(startingAltitude) ||
+      startingAltitude < 0 ||
+      startingAltitude > 60000 ||
+      !Number.isInteger(startingHeading) ||
+      startingHeading < 0 ||
+      startingHeading > 359 ||
       timeParts.length !== 2 ||
       !Number.isInteger(timeParts[0]) ||
       !Number.isInteger(timeParts[1]) ||
@@ -979,11 +990,19 @@ export default function Home() {
       timeParts[1] < 0 ||
       timeParts[1] > 59
     ) {
-      setSetupError('Enter valid coordinates and a valid initial time of day.');
+      setSetupError('Enter valid coordinates, altitude, heading, and initial time of day.');
       return;
     }
 
     setSetupError('');
+    setPosX(0);
+    setPosZ(0);
+    setAltitude(startingAltitude);
+    setPitch(0);
+    setRoll(0);
+    setHeading(startingHeading);
+    setVerticalSpeed(0);
+    localPoseRef.current = null;
     const startTimeMinutes =
       multiplayerRole === 'join' && multiplayerConnected
         ? simulationTimeRef.current
@@ -1172,6 +1191,10 @@ export default function Home() {
         if (disposed) return;
 
         engineInstance = new wasmModule.SimEngine();
+        engineInstance.setInitialConditions(
+          Number(startingAltitudeInput),
+          Number(startingHeadingInput),
+        );
         engineRef.current = engineInstance;
         wasmModuleRef.current = wasmModule;
         setStatus('');
@@ -1577,7 +1600,13 @@ export default function Home() {
       engineRef.current = null;
       wasmModuleRef.current = null;
     };
-  }, [multiplayerRole, simulationStarted, terrainOrigin]);
+  }, [
+    multiplayerRole,
+    simulationStarted,
+    startingAltitudeInput,
+    startingHeadingInput,
+    terrainOrigin,
+  ]);
 
   // Applies radar power changes to the active WebAssembly simulation instance.
   useEffect(() => {
@@ -1799,6 +1828,8 @@ export default function Home() {
         remoteDescription={remoteDescription}
         latitude={latitudeInput}
         longitude={longitudeInput}
+        startingAltitude={startingAltitudeInput}
+        startingHeading={startingHeadingInput}
         weatherPreset={weatherPreset}
         weatherLabel={weatherPreset === 'real' ? 'Open-Meteo weather in flight' : weather.label}
         initialTime={initialTimeInput}
@@ -1814,6 +1845,8 @@ export default function Home() {
         onRemoteDescriptionChange={setRemoteDescription}
         onLatitudeChange={setLatitudeInput}
         onLongitudeChange={setLongitudeInput}
+        onStartingAltitudeChange={setStartingAltitudeInput}
+        onStartingHeadingChange={setStartingHeadingInput}
         onWeatherPresetChange={handleWeatherPresetChange}
         onInitialTimeChange={handleInitialTimeChange}
         onAdsbApiKeyChange={handleAdsbApiKeyChange}

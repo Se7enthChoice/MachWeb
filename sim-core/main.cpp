@@ -18,6 +18,10 @@ private:
     bool radarEnabled = true;
 
 public:
+    void setInitialConditions(float altitude, float heading) {
+        aircraft.setInitialConditions(altitude, heading);
+    }
+
     // Advances each subsystem using a positive timestep capped at 0.1 seconds.
     void tick(float dt) {
         if (!std::isfinite(dt) || dt <= 0.0f) return;
@@ -199,6 +203,7 @@ public:
 EMSCRIPTEN_BINDINGS(sim_engine) {
     emscripten::class_<SimEngine>("SimEngine")
         .constructor<>()
+        .function("setInitialConditions", &SimEngine::setInitialConditions)
         .function("tick", &SimEngine::tick)
         .function("setPitchInput", &SimEngine::setPitchInput)
         .function("setRollInput", &SimEngine::setRollInput)

@@ -31,6 +31,8 @@ private:
     float yawInput = 0.0f;
 
 public:
+    void setInitialConditions(float initialAltitude, float initialHeading);
+
     // Applies the standard three-second damage/crash indication.
     void applyMissileImpact() {
         crashTimeRemaining = std::max(crashTimeRemaining, crashed_duration);

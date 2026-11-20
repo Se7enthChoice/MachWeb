@@ -5,6 +5,25 @@
 
 #include "utils.h"
 
+// Sets the initial altitude and aligns velocity with the selected heading.
+void FlightModel::setInitialConditions(float initialAltitude, float initialHeading) {
+    altitude = clamp_finite(initialAltitude, 0.0f, 60000.0f);
+    heading = wrap_heading(clamp_finite(initialHeading, 0.0f, 360.0f));
+    const float speedFeetPerSecond = airspeed * KTs_to_FPS;
+    const float headingRadians = heading * DEG_to_RAD;
+    velocityX = std::sin(headingRadians) * speedFeetPerSecond;
+    velocityY = 0.0f;
+    velocityZ = -std::cos(headingRadians) * speedFeetPerSecond;
+    pitchAngle = 0.0f;
+    rollAngle = 0.0f;
+    pitchRate = 0.0f;
+    rollRate = 0.0f;
+    yawRate = 0.0f;
+    verticalSpeed = 0.0f;
+    crashTimeRemaining = 0.0f;
+    onGround = false;
+}
+
 // Advances flight dynamics by dt seconds and resolves contact against the terrain.
 void FlightModel::tick(float dt, const Terrain& terrain) {
     crashTimeRemaining = std::max(0.0f, crashTimeRemaining - dt);
