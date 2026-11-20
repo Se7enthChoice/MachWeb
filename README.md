@@ -140,7 +140,8 @@ Open your browser and navigate to http://localhost:3000.
 - **Q / E**: Rudder yaw / sideslip
 - **Shift / Ctrl**: Increase / decrease throttle
 - **N**: Cycle active radar tracks and set the primary target
-- **M**: Launch a missile
+- **M / I**: Launch a radar-guided / infrared-guided missile
+- **C / F**: Dispense chaff / flare
 
 Configure the start location on the preflight screen before selecting **Start Flight**. The location controls are not available while the simulation is running. Select **End Flight** to return to setup; doing so ends the current flight, and the next start creates a fresh simulation.
 
@@ -161,7 +162,11 @@ The bearing-only radar warning receiver appears alongside the radar scope only w
 
 ## Missiles
 
-Press **M** to launch the generic missile. With a selected primary radar track, it guides toward that target within the 10-nautical-mile maximum range. With no target selected, it launches unguided along the aircraft's forward direction even when other radar tracks are available. ADS-B tracks can guide selected missiles, but are excluded from physical hit detection; a missile reaching one produces no impact target or aircraft damage. Unguided missiles preserve their launch direction. Guided missiles accelerate to 900 knots and are limited to 25 degrees per second and 20 g of lateral acceleration. Missiles explode on aircraft or terrain impact, at maximum range, or after their 50-second flight-time fuse expires. Aircraft hit within the missile's 200-foot impact radius show **CRASHED** for three seconds. Missile state and impact events are included in relayed telemetry so every multiplayer client renders the same launches and impacts. The missile type configuration includes range, speed, lifetime, guidance, turn, and RWR-warning settings for adding other weapons later.
+Press **M** to launch the radar-guided missile or **I** to launch the infrared-guided missile. Both can follow a selected primary radar track within their range; with no selected track, either launches unguided. The radar missile reaches 900 knots, turns at up to 25 degrees per second and 20 g, and has a 10-nautical-mile range and 50-second fuse. The infrared missile reaches 1,100 knots, turns at up to 45 degrees per second and 30 g, and has an 8-nautical-mile range and 35-second fuse; it does not trigger the radar warning receiver.
+
+Press **C** to dispense one of 24 chaff bundles against radar seekers, or **F** to dispense one of 12 flares against infrared seekers. Decoys eject behind the aircraft, inherit its motion, drift and fall, and lose effectiveness as they disperse or burn out (8 seconds for chaff, 4 seconds for flares). Seeker field of view, range, decoy type, and fading signature affect whether a missile is seduced; decoys are not guaranteed to defeat a missile. Flares render as hot, bright embers and cast a warm point light whose illumination is strongest at night and subdued in daylight. Countermeasure state is included in multiplayer telemetry so peers' missiles and visuals use the same decoy positions. Missile impacts, terrain strikes, and proximity fuses still apply normally.
+
+Missiles explode on aircraft or terrain impact, at maximum range, or when their flight-time fuse expires. Aircraft hit within the missile's 200-foot impact radius show **CRASHED** for three seconds. Missile state and impact events are included in relayed telemetry so every multiplayer client renders the same launches and impacts. The missile type configuration includes range, speed, lifetime, seeker, turn, and RWR-warning settings for adding other weapons later.
 
 Incoming generic missiles targeting the local aircraft appear as threat bearings on the radar warning receiver. Missile telemetry is validated and bounded before it is relayed to other peers. Remote missile models use a 50 ms interpolation buffer, motion extrapolation capped at 200 ms for delayed snapshots, and frame-rate-independent visual smoothing with a 35 ms time constant.
 

@@ -7,6 +7,7 @@ import { getAircraftCoordinates, getLocalPosition, getSatelliteTileUrl } from '.
 import type { TerrainGrid, TerrainOrigin } from '../terrain';
 import { ADSB_POLL_INTERVAL_MS, ADSB_TRACK_TTL_MS } from '../adsb';
 import type {
+  CountermeasureTelemetry,
   FlightTelemetry,
   MissileTelemetry,
   ReceivedFlightTelemetry,
@@ -42,6 +43,7 @@ interface FlightViewportProps {
   localPlayerId: string;
   localPoseRef: RefObject<LocalPose | null>;
   localMissilesRef: RefObject<MissileTelemetry[]>;
+  localCountermeasuresRef: RefObject<CountermeasureTelemetry[]>;
   radarEnabled: boolean;
   remoteTelemetries: FlightTelemetry[];
   remoteTelemetrySamplesRef: RefObject<Map<string, ReceivedFlightTelemetry[]>>;
@@ -98,6 +100,18 @@ interface MissileVisualInstance {
   model: THREE.Group;
   samples: MissileVisualSample[];
   locallySimulated: boolean;
+}
+
+// Owns per-decoy geometry/materials; the particle texture is shared by the scene.
+interface CountermeasureVisualInstance {
+  model: THREE.Group;
+  chaffMaterial: THREE.PointsMaterial | null;
+  flareCore: THREE.Mesh | null;
+  flareGlow: THREE.Sprite | null;
+  flareGlowMaterial: THREE.SpriteMaterial | null;
+  flareParticles: THREE.Points | null;
+  flareParticleSeeds: Float32Array | null;
+  flareLight: THREE.PointLight | null;
 }
 
 interface AircraftDimensionsFeet {
@@ -805,6 +819,157 @@ function disposeMissile(scene: THREE.Scene, missile: THREE.Group): void {
   });
 }
 
+// A radial alpha falloff gives flare sprites and sparks soft additive edges without image assets.
+function createFlareParticleTexture(): THREE.DataTexture {
+  const size = 32;
+  const data = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const dx = (x + 0.5 - size / 2) / (size / 2);
+      const dy = (y + 0.5 - size / 2) / (size / 2);
+      const radius = Math.sqrt(dx * dx + dy * dy);
+      const alpha = Math.pow(Math.max(0, 1 - radius), 2.5);
+      const offset = (y * size + x) * 4;
+      data[offset] = 255;
+      data[offset + 1] = 255;
+      data[offset + 2] = 255;
+      data[offset + 3] = Math.round(alpha * 255);
+    }
+  }
+  const texture = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearFilter;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+// Chaff is a spreading foil cloud; flares combine a hot core, sparks, glow, and scene lighting.
+function createCountermeasure(
+  typeId: 1 | 2,
+  flareParticleTexture: THREE.DataTexture,
+): CountermeasureVisualInstance {
+  const model = new THREE.Group();
+  if (typeId === 2) {
+    const coreMaterial = new THREE.MeshBasicMaterial({
+      color: 0xfff1ad,
+      toneMapped: false,
+    });
+    const core = new THREE.Mesh(
+      new THREE.SphereGeometry(0.035, 8, 8),
+      coreMaterial,
+    );
+    const glowMaterial = new THREE.SpriteMaterial({
+      map: flareParticleTexture,
+      color: 0xff7428,
+      transparent: true,
+      opacity: 0.75,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
+    });
+    const glow = new THREE.Sprite(glowMaterial);
+    glow.scale.set(0.46, 0.64, 1);
+    model.add(core, glow);
+
+    const particleCount = 40;
+    const particleGeometry = new THREE.BufferGeometry();
+    const particlePositions = new Float32Array(particleCount * 3);
+    const particleColors = new Float32Array(particleCount * 3);
+    const particleSeeds = new Float32Array(particleCount * 3);
+    const sparkPalette = [
+      new THREE.Color(0xff4b16),
+      new THREE.Color(0xff9b32),
+      new THREE.Color(0xffdf8a),
+    ];
+    for (let index = 0; index < particleCount; index += 1) {
+      const offset = index * 3;
+      const color = sparkPalette[index % sparkPalette.length];
+      particleColors[offset] = color.r;
+      particleColors[offset + 1] = color.g;
+      particleColors[offset + 2] = color.b;
+      particleSeeds[offset] = index * 2.39996;
+      particleSeeds[offset + 1] = 0.035 + (index % 7) * 0.012;
+      particleSeeds[offset + 2] = (index % 9) * 0.055;
+    }
+    particleGeometry.setAttribute(
+      'position',
+      new THREE.BufferAttribute(particlePositions, 3).setUsage(THREE.DynamicDrawUsage),
+    );
+    particleGeometry.setAttribute('color', new THREE.BufferAttribute(particleColors, 3));
+    const particleMaterial = new THREE.PointsMaterial({
+      map: flareParticleTexture,
+      size: 0.11,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      sizeAttenuation: true,
+      toneMapped: false,
+    });
+    const particles = new THREE.Points(particleGeometry, particleMaterial);
+    model.add(particles);
+
+    // The local light illuminates terrain and aircraft; intensity is adjusted for daylight below.
+    const flareLight = new THREE.PointLight(0xff8a42, 180, 14, 2);
+    flareLight.castShadow = false;
+    model.add(flareLight);
+    return {
+      model,
+      chaffMaterial: null,
+      flareCore: core,
+      flareGlow: glow,
+      flareGlowMaterial: glowMaterial,
+      flareParticles: particles,
+      flareParticleSeeds: particleSeeds,
+      flareLight,
+    };
+  }
+
+  const positions = new Float32Array(36 * 3);
+  for (let index = 0; index < 36; index += 1) {
+    const offset = index * 3;
+    const angle = index * 2.39996;
+    const radius = 0.04 + (index % 7) * 0.024;
+    positions[offset] = Math.cos(angle) * radius;
+    positions[offset + 1] = Math.sin(angle * 1.7) * radius;
+    positions[offset + 2] = Math.sin(angle) * radius;
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const material = new THREE.PointsMaterial({
+    color: 0xd4d8dc,
+    size: 0.065,
+    transparent: true,
+    opacity: 0.8,
+    depthWrite: false,
+    sizeAttenuation: true,
+  });
+  model.add(new THREE.Points(geometry, material));
+  return {
+    model,
+    chaffMaterial: material,
+    flareCore: null,
+    flareGlow: null,
+    flareGlowMaterial: null,
+    flareParticles: null,
+    flareParticleSeeds: null,
+    flareLight: null,
+  };
+}
+
+function disposeCountermeasure(scene: THREE.Scene, instance: CountermeasureVisualInstance): void {
+  scene.remove(instance.model);
+  instance.model.traverse(object => {
+    if (!(object instanceof THREE.Mesh) && !(object instanceof THREE.Points)) return;
+    object.geometry.dispose();
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    materials.forEach(material => material.dispose());
+  });
+  // The flare sprite material is not a Mesh/Points material, but is still instance-owned.
+  instance.flareGlowMaterial?.dispose();
+}
+
 // Creates a brief, additive particle burst at an impact location.
 function createExplosion(scene: THREE.Scene, position: THREE.Vector3): ExplosionEffect {
   const positions = new Float32Array(EXPLOSION_PARTICLE_COUNT * 3);
@@ -904,6 +1069,7 @@ export default function FlightViewport({
   localPlayerId,
   localPoseRef,
   localMissilesRef,
+  localCountermeasuresRef,
   radarEnabled,
   remoteTelemetries,
   remoteTelemetrySamplesRef,
@@ -929,6 +1095,7 @@ export default function FlightViewport({
   const fallbackGroundRef = useRef<THREE.Group | null>(null);
   const remoteAircraftRef = useRef(new Map<string, RemoteAircraftInstance>());
   const missileInstancesRef = useRef(new Map<string, MissileVisualInstance>());
+  const countermeasureInstancesRef = useRef(new Map<string, CountermeasureVisualInstance>());
   const explosionEffectsRef = useRef<ExplosionEffect[]>([]);
   const seenExplosionsRef = useRef(new Map<string, number>());
   const terrainMeshesRef = useRef<
@@ -948,6 +1115,7 @@ export default function FlightViewport({
     if (!currentMount) return;
     const remoteAircrafts = remoteAircraftRef.current;
     const missileInstances = missileInstancesRef.current;
+    const countermeasureInstances = countermeasureInstancesRef.current;
     const explosionEffects = explosionEffectsRef.current;
     const seenExplosions = seenExplosionsRef.current;
     const terrainTextureCache = terrainTextureCacheRef.current;
@@ -956,6 +1124,7 @@ export default function FlightViewport({
     const scene = new THREE.Scene();
     sceneRef.current = scene;
     scene.background = DAY_SKY.clone();
+    const flareParticleTexture = createFlareParticleTexture();
     // Fog is measured in scene units (feet * visualScale), not simulator feet.
     scene.fog = new THREE.Fog(DAY_SKY, FOG_NEAR, FOG_FAR);
 
@@ -1187,6 +1356,7 @@ export default function FlightViewport({
     let animId: number;
     let previousFrameTime = performance.now();
     const adsbTargetPosition = new THREE.Vector3();
+    let daylightLevel = 1;
     // Mirrors one peer packet's missiles onto the owning aircraft's synchronized timeline.
     const ingestRemoteMissiles = (
       ownerId: string,
@@ -1253,6 +1423,78 @@ export default function FlightViewport({
       seenExplosions.forEach((time, key) => {
         if (receivedAt - time > 10_000) seenExplosions.delete(key);
       });
+    };
+    const updateCountermeasureVisual = (
+      ownerId: string,
+      countermeasure: CountermeasureTelemetry,
+      local: boolean,
+      now: number,
+    ) => {
+      const key = `${ownerId}:${countermeasure.countermeasureId}`;
+      const position = getLocalPosition(terrainOriginRef.current, countermeasure);
+      const worldPosition = new THREE.Vector3(
+        position.posXFeet * visualScale,
+        countermeasure.altitude * visualScale,
+        position.posZFeet * visualScale,
+      );
+      let instance = countermeasureInstances.get(key);
+      if (!instance || instance.model.userData.typeId !== countermeasure.typeId) {
+        if (instance) disposeCountermeasure(scene, instance);
+        instance = createCountermeasure(countermeasure.typeId, flareParticleTexture);
+        instance.model.position.copy(worldPosition);
+        instance.model.userData.typeId = countermeasure.typeId;
+        scene.add(instance.model);
+        countermeasureInstances.set(key, instance);
+      } else if (local) {
+        instance.model.position.copy(worldPosition);
+      } else {
+        instance.model.position.lerp(worldPosition, 0.35);
+      }
+
+      const lifetime = countermeasure.typeId === 1 ? 8 : 4;
+      const lifeRatio = THREE.MathUtils.clamp(
+        1 - countermeasure.ageSeconds / lifetime,
+        0,
+        1,
+      );
+      if (instance.chaffMaterial) {
+        // The foil cloud expands as its fragments disperse, while its visibility fades.
+        instance.model.scale.setScalar(0.75 + (1 - lifeRatio) * 1.8);
+        instance.chaffMaterial.opacity = 0.8 * lifeRatio;
+      }
+      if (instance.flareLight) {
+        // Preserve a hot daytime core but let the flare illuminate its surroundings most at night.
+        const flicker = 0.88 + 0.12 * Math.sin(now * 0.019 + countermeasure.countermeasureId);
+        instance.flareLight.intensity =
+          340 * lifeRatio * (0.12 + 0.88 * (1 - daylightLevel)) * flicker;
+        if (instance.flareCore) instance.flareCore.scale.setScalar(0.9 + flicker * 0.2);
+        if (instance.flareGlow && instance.flareGlowMaterial) {
+          instance.flareGlow.scale.set(0.42 + flicker * 0.12, 0.6 + flicker * 0.16, 1);
+          instance.flareGlowMaterial.opacity = 0.75 * lifeRatio * flicker;
+          instance.flareGlow.material.rotation = Math.sin(now * 0.003) * 0.12;
+        }
+        if (instance.flareParticles && instance.flareParticleSeeds) {
+          // Recycle deterministic sparks down the short falling trail each rendered frame.
+          const positions = instance.flareParticles.geometry.getAttribute('position');
+          const particleCount = instance.flareParticleSeeds.length / 3;
+          const particleTime = now / 1000;
+          for (let index = 0; index < particleCount; index += 1) {
+            const offset = index * 3;
+            const phase = instance.flareParticleSeeds[offset];
+            const radius = instance.flareParticleSeeds[offset + 1];
+            const trailOffset = instance.flareParticleSeeds[offset + 2];
+            const drift = particleTime * (1.8 + (index % 5) * 0.22) + phase;
+            const fall = (particleTime * (0.42 + (index % 4) * 0.08) + trailOffset) % 0.55;
+            positions.setXYZ(
+              index,
+              Math.cos(drift) * radius,
+              0.02 - fall,
+              Math.sin(drift * 0.83) * radius,
+            );
+          }
+          positions.needsUpdate = true;
+        }
+      }
     };
     // Interpolates remote traffic and updates time-dependent lighting each frame.
     const animate = (frameTime?: number) => {
@@ -1682,6 +1924,34 @@ export default function FlightViewport({
         missileInstances.delete(key);
       }
 
+      // Include owner IDs in visual keys because each aircraft numbers its own decoys independently.
+      const activeCountermeasures = new Set<string>();
+      for (const countermeasure of localCountermeasuresRef.current) {
+        activeCountermeasures.add(
+          `${localPlayerIdRef.current}:${countermeasure.countermeasureId}`,
+        );
+        updateCountermeasureVisual(
+          localPlayerIdRef.current,
+          countermeasure,
+          true,
+          now,
+        );
+      }
+      for (const [ownerId, aircraft] of remoteAircrafts) {
+        const latest = aircraft.samples[aircraft.samples.length - 1];
+        if (!latest || now - latest.receivedAt > 2000) continue;
+        for (const countermeasure of latest.telemetry.countermeasures ?? []) {
+          activeCountermeasures.add(`${ownerId}:${countermeasure.countermeasureId}`);
+          updateCountermeasureVisual(ownerId, countermeasure, false, now);
+        }
+      }
+      // Remove visuals once a decoy expires or its owner's telemetry becomes stale.
+      for (const [key, instance] of countermeasureInstances) {
+        if (activeCountermeasures.has(key)) continue;
+        disposeCountermeasure(scene, instance);
+        countermeasureInstances.delete(key);
+      }
+
       const survivingEffects: ExplosionEffect[] = [];
       for (const effect of explosionEffects) {
         const ageSeconds = (now - effect.startedAt) / 1000;
@@ -1731,6 +2001,7 @@ export default function FlightViewport({
       const solarElevation = THREE.MathUtils.degToRad(solarPosition.elevation);
       const solarHeight = Math.sin(solarElevation);
       const daylight = THREE.MathUtils.clamp((solarHeight + 0.12) / 0.32, 0, 1);
+      daylightLevel = daylight;
       const twilight = 1 - THREE.MathUtils.clamp(Math.abs(solarHeight) * 3, 0, 1);
       const sky = skyColor
         .copy(NIGHT_SKY)
@@ -1836,10 +2107,16 @@ export default function FlightViewport({
       resizeObserver.disconnect();
       cancelAnimationFrame(animId);
       cloudNoiseTexture.dispose();
+      // The sprite texture is shared, so release it once rather than per flare instance.
+      flareParticleTexture.dispose();
       snowflakeTexture.dispose();
       terrainWarmupRef.current = null;
       terrainTextureCache.forEach(texture => texture.dispose());
       terrainTextureCache.clear();
+      // Release each decoy's geometry and materials when the viewport is torn down.
+      for (const instance of countermeasureInstances.values()) {
+        disposeCountermeasure(scene, instance);
+      }
       scene.traverse(object => {
         if (object instanceof THREE.DirectionalLight) object.shadow.dispose();
         if (
@@ -1864,11 +2141,18 @@ export default function FlightViewport({
       fallbackGroundRef.current = null;
       remoteAircrafts.clear();
       missileInstances.clear();
+      countermeasureInstances.clear();
       explosionEffects.length = 0;
       seenExplosions.clear();
       terrainMeshesRef.current = [];
     };
-  }, [localMissilesRef, localPlayerIdRef, localPoseRef, remoteTelemetrySamplesRef]);
+  }, [
+    localCountermeasuresRef,
+    localMissilesRef,
+    localPlayerIdRef,
+    localPoseRef,
+    remoteTelemetrySamplesRef,
+  ]);
 
   // Keeps the displayed simulation time available to the render loop.
   useEffect(() => {

@@ -22,6 +22,7 @@ export interface FlightTelemetry {
   sourceAgeSeconds?: number;
   radarDetectedPlayerIds?: string[];
   missiles?: MissileTelemetry[];
+  countermeasures?: CountermeasureTelemetry[];
 }
 
 // Telemetry paired with its local arrival time, which is unaffected by React batching.
@@ -43,6 +44,16 @@ export interface MissileTelemetry {
   triggersRwr: boolean; // Whether this in-flight weapon is an RWR threat.
   targetPlayerId: string | null; // Intended radar target; null for an unguided launch.
   impactPlayerId?: string | null; // Aircraft actually hit
+}
+
+// Compact decoy snapshots replicate seeker type, world position, and age to peers.
+export interface CountermeasureTelemetry {
+  countermeasureId: number;
+  typeId: 1 | 2; // Stable IDs shared with the C++ simulation: chaff=1, flare=2.
+  latitude: number;
+  longitude: number;
+  altitude: number;
+  ageSeconds: number;
 }
 
 // Encodes a WebRTC description as a UTF-8-safe Base64 string for manual exchange.
@@ -186,6 +197,33 @@ function isFlightTelemetry(value: unknown): value is FlightTelemetry {
             missile.impactPlayerId.length <= 64)),
       ));
 
+  // Bound remote decoy count and age so stale or malformed signatures cannot persist.
+  const validCountermeasures =
+    value.countermeasures === undefined ||
+    (Array.isArray(value.countermeasures) &&
+      value.countermeasures.length <= 32 &&
+      value.countermeasures.every(countermeasure =>
+        isRecord(countermeasure) &&
+        typeof countermeasure.countermeasureId === 'number' &&
+        Number.isSafeInteger(countermeasure.countermeasureId) &&
+        countermeasure.countermeasureId > 0 &&
+        (countermeasure.typeId === 1 || countermeasure.typeId === 2) &&
+        typeof countermeasure.latitude === 'number' &&
+        Number.isFinite(countermeasure.latitude) &&
+        countermeasure.latitude >= -90 &&
+        countermeasure.latitude <= 90 &&
+        typeof countermeasure.longitude === 'number' &&
+        Number.isFinite(countermeasure.longitude) &&
+        countermeasure.longitude >= -180 &&
+        countermeasure.longitude <= 180 &&
+        typeof countermeasure.altitude === 'number' &&
+        Number.isFinite(countermeasure.altitude) &&
+        typeof countermeasure.ageSeconds === 'number' &&
+        Number.isFinite(countermeasure.ageSeconds) &&
+        countermeasure.ageSeconds >= 0 &&
+        countermeasure.ageSeconds <= (countermeasure.typeId === 1 ? 8 : 4),
+      ));
+
   return (
     numericFields.every(field => {
       const fieldValue = value[field];
@@ -211,7 +249,8 @@ function isFlightTelemetry(value: unknown): value is FlightTelemetry {
           playerId =>
             typeof playerId === 'string' && playerId.length > 0 && playerId.length <= 64,
           ))) &&
-    validMissiles
+    validMissiles &&
+    validCountermeasures
   );
 }
 

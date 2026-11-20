@@ -59,6 +59,49 @@ public:
     bool addMissileTarget(unsigned int id, float posX, float altitude, float posZ) {
         return missiles.addAircraftTarget(id, posX, altitude, posZ);
     }
+    // The browser refreshes remote decoys each frame; IDs 1 and 2 match the public wire format.
+    void clearCountermeasureTargets() { missiles.clearCountermeasureTargets(); }
+    bool addCountermeasureTarget(
+        unsigned int id,
+        unsigned int type,
+        float posX,
+        float altitude,
+        float posZ,
+        float ageSeconds) {
+        if (type != static_cast<unsigned int>(CountermeasureType::Chaff) &&
+            type != static_cast<unsigned int>(CountermeasureType::Flare)) {
+            return false;
+        }
+        return missiles.addCountermeasureTarget(
+            id,
+            static_cast<CountermeasureType>(type),
+            posX,
+            altitude,
+            posZ,
+            ageSeconds);
+    }
+    bool deployChaff() {
+        // Use the current aircraft pose so the core applies the dispenser's release physics.
+        return missiles.deployCountermeasure(
+            CountermeasureType::Chaff,
+            aircraft.getPosX(),
+            aircraft.getAltitude(),
+            aircraft.getPosZ(),
+            aircraft.getAirspeed(),
+            aircraft.getHeading(),
+            aircraft.getPitch());
+    }
+    bool deployFlare() {
+        // Flares share the dispenser path but have their own stock, cooldown, and seeker signature.
+        return missiles.deployCountermeasure(
+            CountermeasureType::Flare,
+            aircraft.getPosX(),
+            aircraft.getAltitude(),
+            aircraft.getPosZ(),
+            aircraft.getAirspeed(),
+            aircraft.getHeading(),
+            aircraft.getPitch());
+    }
     int launchMissile(unsigned int typeId, unsigned int selectedTargetId) {
         return missiles.launch(
             typeId,
@@ -136,6 +179,20 @@ public:
         return missiles.getImpactTargetId(index);
     }
     bool getMissileTriggersRwr(int index) const { return missiles.getTriggersRwr(index); }
+    // These compact getters are serialized into peer telemetry and consumed by the viewport.
+    int getCountermeasureCount() const { return missiles.getCountermeasureCount(); }
+    unsigned int getCountermeasureId(int index) const {
+        return missiles.getCountermeasureId(index);
+    }
+    unsigned int getCountermeasureType(int index) const {
+        return missiles.getCountermeasureType(index);
+    }
+    float getCountermeasurePosX(int index) const { return missiles.getCountermeasurePosX(index); }
+    float getCountermeasureAltitude(int index) const {
+        return missiles.getCountermeasureAltitude(index);
+    }
+    float getCountermeasurePosZ(int index) const { return missiles.getCountermeasurePosZ(index); }
+    float getCountermeasureAge(int index) const { return missiles.getCountermeasureAge(index); }
 };
 
 // Binds the simulation facade methods used by the web application.
@@ -153,6 +210,11 @@ EMSCRIPTEN_BINDINGS(sim_engine) {
         .function("addRadarTarget", &SimEngine::addRadarTarget)
         .function("clearMissileTargets", &SimEngine::clearMissileTargets)
         .function("addMissileTarget", &SimEngine::addMissileTarget)
+        // Expose validated remote decoy updates and local dispenser controls to JavaScript.
+        .function("clearCountermeasureTargets", &SimEngine::clearCountermeasureTargets)
+        .function("addCountermeasureTarget", &SimEngine::addCountermeasureTarget)
+        .function("deployChaff", &SimEngine::deployChaff)
+        .function("deployFlare", &SimEngine::deployFlare)
         .function("launchMissile", &SimEngine::launchMissile)
         .function("setTerrainData", &SimEngine::setTerrainData)
         .function("clearTerrainData", &SimEngine::clearTerrainData)
@@ -187,5 +249,12 @@ EMSCRIPTEN_BINDINGS(sim_engine) {
         .function("getMissileExploded", &SimEngine::getMissileExploded)
         .function("getMissileImpactTargetId", &SimEngine::getMissileImpactTargetId)
         .function("applyMissileImpact", &SimEngine::applyMissileImpact)
-        .function("getMissileTriggersRwr", &SimEngine::getMissileTriggersRwr);
+        .function("getMissileTriggersRwr", &SimEngine::getMissileTriggersRwr)
+        .function("getCountermeasureCount", &SimEngine::getCountermeasureCount)
+        .function("getCountermeasureId", &SimEngine::getCountermeasureId)
+        .function("getCountermeasureType", &SimEngine::getCountermeasureType)
+        .function("getCountermeasurePosX", &SimEngine::getCountermeasurePosX)
+        .function("getCountermeasureAltitude", &SimEngine::getCountermeasureAltitude)
+        .function("getCountermeasurePosZ", &SimEngine::getCountermeasurePosZ)
+        .function("getCountermeasureAge", &SimEngine::getCountermeasureAge);
 }

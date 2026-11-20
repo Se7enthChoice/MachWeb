@@ -38,6 +38,7 @@ import {
   waitForIceGatheringComplete,
 } from './webrtc';
 import type {
+  CountermeasureTelemetry,
   FlightTelemetry,
   MissileTelemetry,
   ReceivedFlightTelemetry,
@@ -76,6 +77,17 @@ interface SimEngineInstance {
   addRadarTarget(id: number, posX: number, altitude: number, posZ: number): boolean;
   clearMissileTargets(): void;
   addMissileTarget(id: number, posX: number, altitude: number, posZ: number): boolean;
+  clearCountermeasureTargets(): void;
+  addCountermeasureTarget(
+    id: number,
+    type: number,
+    posX: number,
+    altitude: number,
+    posZ: number,
+    ageSeconds: number,
+  ): boolean;
+  deployChaff(): boolean;
+  deployFlare(): boolean;
   getRadarContactCount(): number;
   getRadarContactTargetId(index: number): number;
   getRadarContactRangeNm(index: number): number;
@@ -97,6 +109,13 @@ interface SimEngineInstance {
   getMissileExploded(index: number): boolean;
   getMissileImpactTargetId(index: number): number;
   getMissileTriggersRwr(index: number): boolean;
+  getCountermeasureCount(): number;
+  getCountermeasureId(index: number): number;
+  getCountermeasureType(index: number): number;
+  getCountermeasurePosX(index: number): number;
+  getCountermeasureAltitude(index: number): number;
+  getCountermeasurePosZ(index: number): number;
+  getCountermeasureAge(index: number): number;
   applyMissileImpact(): void;
   delete(): void;
 }
@@ -360,6 +379,8 @@ export default function Home() {
   const [primaryTargetId, setPrimaryTargetId] = useState<number | null>(null);
   const [localPlayerId, setLocalPlayerId] = useState('');
   const localMissilesRef = useRef<MissileTelemetry[]>([]);
+  // The renderer reads live decoy snapshots without waiting for React state updates.
+  const localCountermeasuresRef = useRef<CountermeasureTelemetry[]>([]);
   const [posX, setPosX] = useState<number>(0);
   const [posZ, setPosZ] = useState<number>(0);
   const [status, setStatus] = useState<string>('Initializing flight dynamics...');
@@ -395,6 +416,8 @@ export default function Home() {
   const adsbAircraftRef = useRef<AdsbAircraft[]>([]);
   const adsbSequenceRef = useRef(0);
   const missileLaunchRequestedRef = useRef(false);
+  const missileLaunchTypeRef = useRef(1);
+  const countermeasureDeployRequestedRef = useRef<'chaff' | 'flare' | null>(null);
   const processedMissileImpactsRef = useRef(new Map<string, number>());
   const terrainNeighborhoodKey = getTerrainNeighborhoodKey(terrainOrigin, posX, posZ);
 
@@ -989,6 +1012,10 @@ export default function Home() {
     );
     setSimulationStarted(true);
     localMissilesRef.current = [];
+    localCountermeasuresRef.current = [];
+    missileLaunchRequestedRef.current = false;
+    missileLaunchTypeRef.current = 1;
+    countermeasureDeployRequestedRef.current = null;
     processedMissileImpactsRef.current.clear();
     primaryTargetIdRef.current = null;
     setPrimaryTargetId(null);
@@ -1019,7 +1046,10 @@ export default function Home() {
     setVerticalSpeed(0);
     setCrashed(false);
     localMissilesRef.current = [];
+    localCountermeasuresRef.current = [];
     missileLaunchRequestedRef.current = false;
+    missileLaunchTypeRef.current = 1;
+    countermeasureDeployRequestedRef.current = null;
     processedMissileImpactsRef.current.clear();
     setAdsbStatus('ADS-B off - add an API key in preflight.');
     setWeatherPreset('real');
@@ -1095,9 +1125,28 @@ export default function Home() {
           }
         }
       }
+      // Queue weapon actions here; the simulation loop applies them at its next tick.
       if (event.code === 'KeyM' && !typing) {
         event.preventDefault();
-        if (!event.repeat) missileLaunchRequestedRef.current = true;
+        if (!event.repeat) {
+          missileLaunchTypeRef.current = 1;
+          missileLaunchRequestedRef.current = true;
+        }
+      }
+      if (event.code === 'KeyI' && !typing) {
+        event.preventDefault();
+        if (!event.repeat) {
+          missileLaunchTypeRef.current = 2;
+          missileLaunchRequestedRef.current = true;
+        }
+      }
+      if (event.code === 'KeyC' && !typing) {
+        event.preventDefault();
+        if (!event.repeat) countermeasureDeployRequestedRef.current = 'chaff';
+      }
+      if (event.code === 'KeyF' && !typing) {
+        event.preventDefault();
+        if (!event.repeat) countermeasureDeployRequestedRef.current = 'flare';
       }
       keysPressed.add(event.code);
     };
@@ -1169,19 +1218,20 @@ export default function Home() {
             );
             if (missileLaunchRequestedRef.current) {
               missileLaunchRequestedRef.current = false;
+              const missileTypeId = missileLaunchTypeRef.current;
               const selectedTargetId = primaryTargetIdRef.current;
               const selectedTargetIsAdsb =
                 selectedTargetId !== null &&
                 radarTargetKindsRef.current.get(selectedTargetId) === 'adsb';
               const launchResult = engineInstance.launchMissile(
-                1,
+                missileTypeId,
                 selectedTargetId ?? 0,
               );
               setStatus(
                 launchResult === 2
                   ? selectedTargetIsAdsb
-                    ? 'Radar-guided missile launched.' //'Missile guided toward ADS-B track; impact disabled.'
-                    : 'Radar-guided missile launched.'
+                    ? `${missileTypeId === 2 ? 'Infrared' : 'Radar'}-guided missile launched.`
+                    : `${missileTypeId === 2 ? 'Infrared' : 'Radar'}-guided missile launched.`
                   : launchResult === 1
                     ? 'Unguided missile launched.'
                     : launchResult === 3
@@ -1191,6 +1241,19 @@ export default function Home() {
                         : launchResult === 5
                           ? 'Missile launch rejected: track is outside the 10 NM missile range.'
                           : 'Missile launch rejected: invalid flight state.',
+              );
+            }
+            if (countermeasureDeployRequestedRef.current !== null) {
+              // Keep dispenser state changes on the simulation tick with missile launches.
+              const countermeasureType = countermeasureDeployRequestedRef.current;
+              countermeasureDeployRequestedRef.current = null;
+              const deployed = countermeasureType === 'chaff'
+                ? engineInstance.deployChaff()
+                : engineInstance.deployFlare();
+              setStatus(
+                deployed
+                  ? `${countermeasureType === 'chaff' ? 'Chaff' : 'Flare'} deployed.`
+                  : `${countermeasureType === 'chaff' ? 'Chaff' : 'Flare'} unavailable: depleted, cooling down, or dispenser full.`,
               );
             }
 
@@ -1211,6 +1274,7 @@ export default function Home() {
               )
               .slice(0, MAX_RADAR_TARGETS);
             engineInstance.clearMissileTargets();
+            engineInstance.clearCountermeasureTargets();
             if (radarEnabledRef.current) engineInstance.clearRadarTargets();
             for (const target of recentAircraftTargets) {
               const isAdsb = target.playerId.startsWith('adsb:');
@@ -1242,6 +1306,22 @@ export default function Home() {
                 targetPosition.posZFeet,
               )) {
                 setStatus('Radar could not accept an aircraft target.');
+              }
+              if (!isAdsb) {
+                // ADS-B contacts have no player-owned stores; only peer decoys enter seeker search.
+                for (const countermeasure of target.countermeasures ?? []) {
+                  const position = getLocalPosition(terrainOrigin, countermeasure);
+                  if (!engineInstance.addCountermeasureTarget(
+                    countermeasure.countermeasureId,
+                    countermeasure.typeId,
+                    position.posXFeet,
+                    countermeasure.altitude,
+                    position.posZFeet,
+                    countermeasure.ageSeconds,
+                  )) {
+                    setStatus('Missile system could not accept a countermeasure target.');
+                  }
+                }
               }
             }
 
@@ -1349,6 +1429,26 @@ export default function Home() {
                 };
               });
             localMissilesRef.current = readMissiles();
+            const readCountermeasures = (): CountermeasureTelemetry[] =>
+              // Convert local simulator feet into the geographic snapshot format used by peers.
+              Array.from(
+                { length: missileEngine.getCountermeasureCount() },
+                (_, index) => {
+                  const position = getAircraftCoordinates(
+                    terrainOrigin,
+                    missileEngine.getCountermeasurePosX(index),
+                    missileEngine.getCountermeasurePosZ(index),
+                  );
+                  return {
+                    countermeasureId: missileEngine.getCountermeasureId(index),
+                    typeId: missileEngine.getCountermeasureType(index) === 2 ? 2 : 1,
+                    ...position,
+                    altitude: missileEngine.getCountermeasureAltitude(index),
+                    ageSeconds: missileEngine.getCountermeasureAge(index),
+                  };
+                },
+              );
+            localCountermeasuresRef.current = readCountermeasures();
 
             // Read radar returns at 10 Hz instead of triggering a render every frame.
             if (radarEnabledRef.current) {
@@ -1394,7 +1494,7 @@ export default function Home() {
               );
             }
 
-            // Frequent, disposable snapshots keep flight and missile state close to real time.
+            // Frequent disposable snapshots carry both missile and decoy state to peers.
             telemetrySendElapsed += clampedDt;
             const openChannels = Array.from(dataChannelsRef.current.values())
               .filter(channel => channel.readyState === 'open');
@@ -1438,6 +1538,7 @@ export default function Home() {
                 sampleTimeMs: currentTime,
                 radarDetectedPlayerIds,
                 missiles: readMissiles(),
+                countermeasures: readCountermeasures(),
               };
               telemetrySequenceRef.current += 1;
               const message = JSON.stringify({ type: 'telemetry', telemetry });
@@ -1741,6 +1842,7 @@ export default function Home() {
             localPlayerId={localPlayerId}
             localPoseRef={localPoseRef}
             localMissilesRef={localMissilesRef}
+            localCountermeasuresRef={localCountermeasuresRef}
             radarEnabled={radarEnabled}
             remoteTelemetries={remoteTelemetries}
             remoteTelemetrySamplesRef={remoteTelemetrySamplesRef}
@@ -1802,7 +1904,13 @@ export default function Home() {
               <strong className="text-emerald-400">N</strong>: Cycle nearest-first, then deselect target
             </div>
             <div className="col-span-2">
-              <strong className="text-emerald-400">M</strong>: Launch missile
+              <strong className="text-emerald-400">M / I</strong>: Launch radar / infrared missile
+            </div>
+            <div>
+              <strong className="text-emerald-400">C</strong>: Deploy chaff
+            </div>
+            <div>
+              <strong className="text-emerald-400">F</strong>: Deploy flare
             </div>
           </div>
           <div className="mt-4 flex justify-end">
