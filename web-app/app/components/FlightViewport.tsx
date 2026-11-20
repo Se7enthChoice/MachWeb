@@ -148,6 +148,7 @@ const REMOTE_CLOCK_WINDOW_SAMPLES = 150;
 const MAX_REMOTE_EXTRAPOLATION_MS = 120;
 const ADSB_INTERPOLATION_DELAY_MS = ADSB_POLL_INTERVAL_MS * 1.25;
 const ADSB_VISUAL_SMOOTHING_SECONDS = 0.35;
+const KNOTS_TO_FEET_PER_SECOND = 1.687809857;
 const MAX_MISSILE_EXTRAPOLATION_MS = 200;
 const MISSILE_ROTATION_SMOOTHING_SECONDS = 0.035;
 const MAX_REMOTE_SAMPLES = 20;
@@ -537,11 +538,56 @@ function ingestRemoteSample(
     instance.sendIntervalMs += (THREE.MathUtils.clamp(spacing, 10, 200) - instance.sendIntervalMs) * 0.1;
   }
 
+  const isAdsb = telemetry.playerId.startsWith('adsb:');
+  const sourceAgeSeconds = isAdsb &&
+      typeof telemetry.sourceAgeSeconds === 'number' &&
+      Number.isFinite(telemetry.sourceAgeSeconds)
+    ? Math.max(0, telemetry.sourceAgeSeconds)
+    : 0;
   const localPosition = getLocalPosition(origin, telemetry);
+  const headingRadians = THREE.MathUtils.degToRad(telemetry.heading);
+  const groundSpeedFeetPerSecond = telemetry.airspeed * KNOTS_TO_FEET_PER_SECOND;
+  localPosition.posXFeet +=
+    Math.sin(headingRadians) * groundSpeedFeetPerSecond * sourceAgeSeconds;
+  localPosition.posZFeet -=
+    Math.cos(headingRadians) * groundSpeedFeetPerSecond * sourceAgeSeconds;
+  if (isAdsb && previous) {
+    const intervalSeconds = (timelineAt - previous.timelineAt) / 1000;
+    if (intervalSeconds > 0) {
+      const previousTelemetry = previous.telemetry;
+      const previousHeadingRadians = THREE.MathUtils.degToRad(previousTelemetry.heading);
+      const previousGroundSpeed =
+        previousTelemetry.airspeed * KNOTS_TO_FEET_PER_SECOND;
+      const predictedX =
+        previous.posXFeet +
+        Math.sin(previousHeadingRadians) * previousGroundSpeed * intervalSeconds;
+      const predictedZ =
+        previous.posZFeet -
+        Math.cos(previousHeadingRadians) * previousGroundSpeed * intervalSeconds;
+      const courseChange = Math.abs(
+        interpolateAngle(previousTelemetry.heading, telemetry.heading, 1) -
+          previousTelemetry.heading,
+      );
+      const speedChange = Math.abs(telemetry.airspeed - previousTelemetry.airspeed);
+      const correction = intervalSeconds > 6 || courseChange > 15 || speedChange > 50
+        ? 0.75
+        : 0.35;
+      localPosition.posXFeet =
+        predictedX + (localPosition.posXFeet - predictedX) * correction;
+      localPosition.posZFeet =
+        predictedZ + (localPosition.posZFeet - predictedZ) * correction;
+    }
+  }
+  const sampledTelemetry = sourceAgeSeconds > 0
+    ? {
+        ...telemetry,
+        altitude: telemetry.altitude + telemetry.verticalSpeed * sourceAgeSeconds / 60,
+      }
+    : telemetry;
   instance.samples.push({
     receivedAt,
     timelineAt,
-    telemetry,
+    telemetry: sampledTelemetry,
     posXFeet: localPosition.posXFeet,
     posZFeet: localPosition.posZFeet,
   });
@@ -679,7 +725,10 @@ function createRemoteAircraft(
     wingShape.lineTo(-0.465, -0.31);
     wingShape.lineTo(-0.485, -0.1);
     wingShape.closePath();
-    const wings = new THREE.Mesh(new THREE.ShapeGeometry(wingShape), aircraftMaterial);
+    const wings = new THREE.Mesh(
+      new THREE.ShapeGeometry(wingShape),
+      new THREE.MeshLambertMaterial({ color, side: THREE.DoubleSide }),
+    );
     wings.rotation.x = -Math.PI / 2;
     wings.position.y = -0.005;
     wings.castShadow = true;
@@ -1719,17 +1768,60 @@ export default function FlightViewport({
         const targetRoll = -THREE.MathUtils.degToRad(
           interpolateAngle(start.roll, end.roll, amount),
         );
+        const targetX = THREE.MathUtils.lerp(
+          first.posXFeet,
+          second?.posXFeet ?? first.posXFeet,
+          amount,
+        );
+        const targetAltitude = THREE.MathUtils.lerp(start.altitude, end.altitude, amount);
+        const targetZ = THREE.MathUtils.lerp(
+          first.posZFeet,
+          second?.posZFeet ?? first.posZFeet,
+          amount,
+        );
         aircraft.visible = true;
         adsbTargetPosition.set(
-          THREE.MathUtils.lerp(first.posXFeet, second?.posXFeet ?? first.posXFeet, amount) *
-            visualScale,
-          THREE.MathUtils.lerp(start.altitude, end.altitude, amount) * visualScale,
-          THREE.MathUtils.lerp(
-            first.posZFeet,
-            second?.posZFeet ?? first.posZFeet,
-            amount,
-          ) * visualScale,
+          targetX * visualScale,
+          targetAltitude * visualScale,
+          targetZ * visualScale,
         );
+        if (isAdsb) {
+          const extrapolationSeconds = THREE.MathUtils.clamp(
+            (renderTime - latestSample.timelineAt) / 1000,
+            0,
+            ADSB_TRACK_TTL_MS / 1000,
+          );
+          const latest = latestSample.telemetry;
+          const latestHeadingRadians = THREE.MathUtils.degToRad(latest.heading);
+          const latestGroundSpeed = latest.airspeed * KNOTS_TO_FEET_PER_SECOND;
+          let velocityX = Math.sin(latestHeadingRadians) * latestGroundSpeed;
+          let velocityY = latest.verticalSpeed / 60;
+          let velocityZ = -Math.cos(latestHeadingRadians) * latestGroundSpeed;
+          if (samples.length > 1) {
+            const previousSample = samples[samples.length - 2];
+            const previousIntervalSeconds =
+              (latestSample.timelineAt - previousSample.timelineAt) / 1000;
+            if (previousIntervalSeconds > 0) {
+              if (latestGroundSpeed === 0) {
+                velocityX =
+                  (latestSample.posXFeet - previousSample.posXFeet) /
+                  previousIntervalSeconds;
+                velocityZ =
+                  (latestSample.posZFeet - previousSample.posZFeet) /
+                  previousIntervalSeconds;
+              }
+              if (latest.verticalSpeed === 0) {
+                velocityY =
+                  (latest.altitude - previousSample.telemetry.altitude) /
+                  previousIntervalSeconds;
+              }
+            }
+          }
+          adsbTargetPosition.x +=
+            velocityX * extrapolationSeconds * visualScale;
+          adsbTargetPosition.y += velocityY * extrapolationSeconds * visualScale;
+          adsbTargetPosition.z += velocityZ * extrapolationSeconds * visualScale;
+        }
         if (isAdsb) {
           if (aircraft.userData.adsbPositionInitialized !== true) {
             aircraft.position.copy(adsbTargetPosition);
