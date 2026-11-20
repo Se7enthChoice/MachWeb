@@ -70,6 +70,7 @@ interface RemoteAircraftSample {
 interface RemoteAircraftInstance {
   aircraft: THREE.Group;
   lights: THREE.Group;
+  pointLights: THREE.PointLight[];
   samples: RemoteAircraftSample[];
   lastSequence: number;
   clockOffsetMs: number | null; // Local arrival time minus sender sample time, minimum-filtered.
@@ -152,6 +153,9 @@ const KNOTS_TO_FEET_PER_SECOND = 1.687809857;
 const MAX_MISSILE_EXTRAPOLATION_MS = 200;
 const MISSILE_ROTATION_SMOOTHING_SECONDS = 0.035;
 const MAX_REMOTE_SAMPLES = 20;
+// Each active point light adds per-fragment work to every lit material, so only the nearest aircraft are lit at night.
+const MAX_NIGHT_AIRCRAFT_POINT_LIGHTS = 5;
+const NIGHT_AIRCRAFT_LIGHT_RANGE_FEET = 5 * 5280;
 const REMOTE_AIRCRAFT_COLORS = [0x38bdf8, 0xfbbf24, 0xf472b6, 0xa3e635, 0xc084fc];
 const TERRAIN_MESH_SEGMENTS = 64;
 const TERRAIN_MESHES_PER_FRAME = 4;
@@ -678,7 +682,7 @@ function createRemoteAircraft(
   color: number,
   dimensions: AircraftDimensionsFeet,
   kind: 'fighter' | 'airliner',
-): { aircraft: THREE.Group; lights: THREE.Group } {
+): { aircraft: THREE.Group; lights: THREE.Group; pointLights: THREE.PointLight[] } {
   const aircraft = new THREE.Group();
   aircraft.scale.set(
     dimensions.wingspanFeet / REMOTE_AIRCRAFT_BASE_DIMENSIONS.wingspanFeet,
@@ -686,6 +690,7 @@ function createRemoteAircraft(
     dimensions.lengthFeet / REMOTE_AIRCRAFT_BASE_DIMENSIONS.lengthFeet,
   );
   const lights = new THREE.Group();
+  const pointLights: THREE.PointLight[] = [];
   const aircraftMaterial = new THREE.MeshLambertMaterial({ color });
   const cockpitMaterial = new THREE.MeshLambertMaterial({ color: 0xe0f2fe });
   if (kind === 'airliner') {
@@ -813,7 +818,10 @@ function createRemoteAircraft(
   const addAircraftLight = (x: number, y: number, z: number, color: number) => {
     const lightGroup = new THREE.Group();
     lightGroup.position.set(x, y, z);
-    lightGroup.add(new THREE.PointLight(color, 4, 45, 2));
+    const pointLight = new THREE.PointLight(color, 4, 45, 2);
+    pointLight.visible = false;
+    pointLights.push(pointLight);
+    lightGroup.add(pointLight);
     lightGroup.add(new THREE.Mesh(
       new THREE.SphereGeometry(0.045, 8, 6),
       new THREE.MeshBasicMaterial({ color, toneMapped: false }),
@@ -830,7 +838,7 @@ function createRemoteAircraft(
   aircraft.add(lights);
   aircraft.visible = false;
 
-  return { aircraft, lights };
+  return { aircraft, lights, pointLights };
 }
 
 // Builds a small forward-pointing missile model in its own local coordinate frame.
@@ -1843,6 +1851,24 @@ export default function FlightViewport({
           aircraft.rotation.z = targetRoll;
         }
         aircraft.rotation.order = 'YXZ';
+      }
+
+      // Light only the nearest aircraft within range at night; the glowing markers stay visible on all of them.
+      const nightLightRangeSq = (NIGHT_AIRCRAFT_LIGHT_RANGE_FEET * visualScale) ** 2;
+      const nightAircraft: RemoteAircraftInstance[] = [];
+      for (const instance of remoteAircrafts.values()) {
+        for (const light of instance.pointLights) light.visible = false;
+        if (instance.aircraft.visible && instance.lights.visible) {
+          const distanceSq = instance.aircraft.position.distanceToSquared(camera.position);
+          if (distanceSq <= nightLightRangeSq) nightAircraft.push(instance);
+        }
+      }
+      nightAircraft.sort((a, b) =>
+        a.aircraft.position.distanceToSquared(camera.position) -
+        b.aircraft.position.distanceToSquared(camera.position)
+      );
+      for (const instance of nightAircraft.slice(0, MAX_NIGHT_AIRCRAFT_POINT_LIGHTS)) {
+        for (const light of instance.pointLights) light.visible = true;
       }
 
       for (const [key, missile] of missileInstances) {
