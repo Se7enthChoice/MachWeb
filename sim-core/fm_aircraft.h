@@ -17,6 +17,10 @@ private:
     float throttle = 0.43f;
     float crashTimeRemaining = 0.0f;
     bool onGround = false;
+    // Gear starts down; retracted gear removes the normal wheel-clearance allowance.
+    bool landingGearDown = true;
+    // Keeps terrain alignment from cancelling a pilot-requested takeoff rotation.
+    bool gearRotationRequested = false;
 
     float pitchAngle = 0.0f;
     float rollAngle = 0.0f;
@@ -29,6 +33,7 @@ private:
     float pitchInput = 0.0f;
     float rollInput = 0.0f;
     float yawInput = 0.0f;
+    bool brakeInput = false;
 
 public:
     void setInitialConditions(float initialAltitude, float initialHeading);
@@ -43,6 +48,10 @@ public:
     void setRollInput(float value);
     void setYawInput(float value);
     void setThrottle(float value);
+    // Changes terrain-contact mode and clears the previous ground/rotation latch as needed.
+    void setLandingGearDown(bool down);
+    // Wheel braking is applied only during gear-down ground contact.
+    void setBrakeInput(bool braking);
     void setWind(float eastKnots, float northKnots);
 
     float getPosX() const { return posX; }
@@ -54,5 +63,7 @@ public:
     float getRoll() const { return rollAngle; }
     float getHeading() const { return heading; }
     float getVerticalSpeed() const { return verticalSpeed; }
+    // Reports wheel-supported ground contact, not a gear-up fuselage impact.
+    bool getOnGround() const { return onGround && landingGearDown; }
     bool getCrashed() const { return crashTimeRemaining > 0.0f; }
 };

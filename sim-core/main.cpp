@@ -46,6 +46,9 @@ public:
     void setRollInput(float value) { aircraft.setRollInput(value); }
     void setYawInput(float value) { aircraft.setYawInput(value); }
     void setThrottle(float value) { aircraft.setThrottle(value); }
+    // Forward gear and brake controls to the flight model's ground-contact logic.
+    void setLandingGearDown(bool down) { aircraft.setLandingGearDown(down); }
+    void setBrakeInput(bool braking) { aircraft.setBrakeInput(braking); }
     void setWind(float eastKnots, float northKnots) {
         aircraft.setWind(eastKnots, northKnots);
     }
@@ -158,6 +161,8 @@ public:
     float getRoll() const { return aircraft.getRoll(); }
     float getHeading() const { return aircraft.getHeading(); }
     float getVerticalSpeed() const { return aircraft.getVerticalSpeed(); }
+    // Expose wheel-supported contact so the browser can distinguish braking from throttle control.
+    bool getOnGround() const { return aircraft.getOnGround(); }
     bool getCrashed() const { return aircraft.getCrashed(); }
     int getRadarContactCount() const { return radar.getContactCount(); }
     unsigned int getRadarContactTargetId(int index) const {
@@ -209,6 +214,9 @@ EMSCRIPTEN_BINDINGS(sim_engine) {
         .function("setRollInput", &SimEngine::setRollInput)
         .function("setYawInput", &SimEngine::setYawInput)
         .function("setThrottle", &SimEngine::setThrottle)
+        // Export gear and brake controls and ground state to the browser.
+        .function("setLandingGearDown", &SimEngine::setLandingGearDown)
+        .function("setBrakeInput", &SimEngine::setBrakeInput)
         .function("setWind", &SimEngine::setWind)
         .function("setRadarEnabled", &SimEngine::setRadarEnabled)
         .function("clearRadarTargets", &SimEngine::clearRadarTargets)
@@ -233,6 +241,7 @@ EMSCRIPTEN_BINDINGS(sim_engine) {
         .function("getRoll", &SimEngine::getRoll)
         .function("getHeading", &SimEngine::getHeading)
         .function("getVerticalSpeed", &SimEngine::getVerticalSpeed)
+        .function("getOnGround", &SimEngine::getOnGround)
         .function("getCrashed", &SimEngine::getCrashed)
         .function("getRadarContactCount", &SimEngine::getRadarContactCount)
         .function("getRadarContactTargetId", &SimEngine::getRadarContactTargetId)

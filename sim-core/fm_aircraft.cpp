@@ -5,6 +5,15 @@
 
 #include "utils.h"
 
+namespace {
+// Landing-gear dimensions, touchdown limits, and ground-contact response in simulator units.
+constexpr float LANDING_GEAR_CLEARANCE_FEET = 15.0f;
+constexpr float LANDING_GEAR_SLOPE_SAMPLE_FEET = 50.0f;
+constexpr float MAX_SAFE_LANDING_SINK_RATE_FPS = 15.0f;
+constexpr float MAX_GROUND_ATTITUDE_DEGREES = 30.0f;
+constexpr float GROUND_BRAKING_DECELERATION_FPS2 = 20.0f;
+}
+
 // Sets the initial altitude and aligns velocity with the selected heading.
 void FlightModel::setInitialConditions(float initialAltitude, float initialHeading) {
     altitude = clamp_finite(initialAltitude, 0.0f, 60000.0f);
@@ -22,6 +31,9 @@ void FlightModel::setInitialConditions(float initialAltitude, float initialHeadi
     verticalSpeed = 0.0f;
     crashTimeRemaining = 0.0f;
     onGround = false;
+    // Each new flight starts with deployed gear and no pending takeoff rotation.
+    landingGearDown = true;
+    gearRotationRequested = false;
 }
 
 // Advances flight dynamics by dt seconds and resolves contact against the terrain.
@@ -134,6 +146,22 @@ void FlightModel::tick(float dt, const Terrain& terrain) {
         velocityZ *= scale;
     }
 
+    // Apply wheel force against ground-relative motion, accounting for wind, only on the gear.
+    if (brakeInput && onGround && landingGearDown) {
+        const float groundVelocityX = velocityX + windX;
+        const float groundVelocityZ = velocityZ + windZ;
+        const float groundSpeed = std::sqrt(
+            groundVelocityX * groundVelocityX + groundVelocityZ * groundVelocityZ);
+        const float reducedGroundSpeed = std::max(
+            0.0f,
+            groundSpeed - GROUND_BRAKING_DECELERATION_FPS2 * dt);
+        const float speedScale = groundSpeed > 0.001f
+            ? reducedGroundSpeed / groundSpeed
+            : 0.0f;
+        velocityX = groundVelocityX * speedScale - windX;
+        velocityZ = groundVelocityZ * speedScale - windZ;
+    }
+
     posX += (velocityX + windX) * dt;
     altitude += velocityY * dt;
     posZ += (velocityZ + windZ) * dt;
@@ -187,16 +215,67 @@ void FlightModel::tick(float dt, const Terrain& terrain) {
         std::atan2(-right.y, up.y) * RAD_to_DEG +
         (useInvertedPitch ? 180.0f : 0.0f));
 
-    // Clamp descent at terrain elevation and start the crash timer on contact.
+    // Contact height is the wheel clearance with gear down, or the terrain itself with gear up.
     const float groundElevation = terrain.getElevationFeet(posX, posZ);
-    if (altitude <= groundElevation && velocityY < 0.0f) {
-        if (!onGround) crashTimeRemaining = crashed_duration;
-        altitude = groundElevation;
-        velocityY = 0.0f;
+    const float contactAltitude = groundElevation +
+        (landingGearDown ? LANDING_GEAR_CLEARANCE_FEET : 0.0f);
+
+    // Latch a nose-up request near contact so ground-slope alignment cannot undo rotation.
+    if (landingGearDown && altitude <= contactAltitude && pitchInput > 0.0f) {
+        gearRotationRequested = true;
+    }
+
+    if (altitude <= contactAltitude) {
+        // A retracted-gear strike always crashes; a gear-down touchdown crashes only above
+        // the safe sink-rate limit.
+        if (!onGround && (!landingGearDown ||
+            velocityY < -MAX_SAFE_LANDING_SINK_RATE_FPS)) {
+            crashTimeRemaining = crashed_duration;
+        }
+        altitude = contactAltitude;
+        if (velocityY < 0.0f) velocityY = 0.0f;
         verticalSpeed = 0.0f;
         onGround = true;
+        if (landingGearDown) {
+            // Estimate runway pitch and cross-slope roll from terrain samples around the wheels.
+            const float sampleDistance = LANDING_GEAR_SLOPE_SAMPLE_FEET;
+            const float sinHeading = std::sin(heading * DEG_to_RAD);
+            const float cosHeading = std::cos(heading * DEG_to_RAD);
+            const float aheadElevation = terrain.getElevationFeet(
+                posX + sinHeading * sampleDistance,
+                posZ - cosHeading * sampleDistance);
+            const float behindElevation = terrain.getElevationFeet(
+                posX - sinHeading * sampleDistance,
+                posZ + cosHeading * sampleDistance);
+            const float rightElevation = terrain.getElevationFeet(
+                posX + cosHeading * sampleDistance,
+                posZ + sinHeading * sampleDistance);
+            const float leftElevation = terrain.getElevationFeet(
+                posX - cosHeading * sampleDistance,
+                posZ - sinHeading * sampleDistance);
+            // Preserve a commanded pitch while rotating for takeoff; otherwise follow the slope.
+            if (!gearRotationRequested) {
+                pitchAngle = std::clamp(
+                    std::atan((aheadElevation - behindElevation) / (2.0f * sampleDistance)) *
+                        RAD_to_DEG,
+                    -MAX_GROUND_ATTITUDE_DEGREES,
+                    MAX_GROUND_ATTITUDE_DEGREES);
+                pitchRate = 0.0f;
+            }
+            // Pilot bank input takes priority over terrain roll alignment.
+            if (rollInput == 0.0f) {
+                rollAngle = std::clamp(
+                    std::atan((leftElevation - rightElevation) / (2.0f * sampleDistance)) *
+                        RAD_to_DEG,
+                    -MAX_GROUND_ATTITUDE_DEGREES,
+                    MAX_GROUND_ATTITUDE_DEGREES);
+                rollRate = 0.0f;
+            }
+        }
     } else {
         onGround = false;
+        // Clear the rotation latch once airborne so a later landing aligns normally.
+        gearRotationRequested = false;
     }
 }
 
@@ -218,6 +297,19 @@ void FlightModel::setYawInput(float value) {
 // Updates throttle for finite input, clamping the normalized value to [0, 1].
 void FlightModel::setThrottle(float value) {
     if (std::isfinite(value)) throttle = std::clamp(value, 0.0f, 1.0f);
+}
+
+// Sets whether terrain contact uses the 15 ft wheel clearance or the terrain surface.
+void FlightModel::setLandingGearDown(bool down) {
+    landingGearDown = down;
+    gearRotationRequested = false;
+    // Retracting the gear ends wheel-supported contact immediately.
+    if (!down) onGround = false;
+}
+
+// Applies wheel braking only while the landing gear is on the ground.
+void FlightModel::setBrakeInput(bool braking) {
+    brakeInput = braking;
 }
 
 // Stores bounded east/north ambient wind in feet per second.

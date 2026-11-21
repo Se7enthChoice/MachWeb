@@ -52,6 +52,9 @@ interface SimEngineInstance {
   setRollInput(value: number): void;
   setYawInput(value: number): void;
   setThrottle(value: number): void;
+  // Keep the Wasm gear state synchronized with the keyboard/HUD state.
+  setLandingGearDown(down: boolean): void;
+  setBrakeInput(braking: boolean): void;
   setWind(eastKnots: number, northKnots: number): void;
   setTerrainData(
     dataPointer: number,
@@ -72,6 +75,8 @@ interface SimEngineInstance {
   getRoll(): number;
   getHeading(): number;
   getVerticalSpeed(): number;
+  // True only when deployed gear is supporting the aircraft on terrain.
+  getOnGround(): boolean;
   getCrashed(): boolean;
   setRadarEnabled(enabled: boolean): void;
   clearRadarTargets(): void;
@@ -374,6 +379,8 @@ export default function Home() {
   const [heading, setHeading] = useState<number>(0);
   const [verticalSpeed, setVerticalSpeed] = useState<number>(0);
   const [crashed, setCrashed] = useState(false);
+  // React state drives the HUD; the ref lets the key handler and Wasm startup read synchronously.
+  const [landingGearDown, setLandingGearDown] = useState(true);
   const [radarEnabled, setRadarEnabled] = useState(true);
   const [radarContacts, setRadarContacts] = useState<RadarContact[]>([]);
   const [radarScanAzimuth, setRadarScanAzimuth] = useState(-60);
@@ -390,6 +397,8 @@ export default function Home() {
 
   // Mutable values shared with callbacks and animation loops without rerendering.
   const throttleRef = useRef(0.43);
+  // Keep the current gear state available before React renders the HUD update.
+  const landingGearDownRef = useRef(true);
   const weatherRef = useRef(weather);
   const radarEnabledRef = useRef(radarEnabled);
   const engineRef = useRef<SimEngineInstance | null>(null);
@@ -1002,6 +1011,9 @@ export default function Home() {
     setRoll(0);
     setHeading(startingHeading);
     setVerticalSpeed(0);
+    // A new flight always begins with the landing gear deployed.
+    landingGearDownRef.current = true;
+    setLandingGearDown(true);
     localPoseRef.current = null;
     const startTimeMinutes =
       multiplayerRole === 'join' && multiplayerConnected
@@ -1063,6 +1075,9 @@ export default function Home() {
     setRoll(0);
     setHeading(0);
     setVerticalSpeed(0);
+    // Restore the default gear state when returning to preflight.
+    landingGearDownRef.current = true;
+    setLandingGearDown(true);
     setCrashed(false);
     localMissilesRef.current = [];
     localCountermeasuresRef.current = [];
@@ -1118,6 +1133,18 @@ export default function Home() {
       const typing =
         target instanceof HTMLElement &&
         (target.isContentEditable || target.closest('input, textarea, select'));
+      // G toggles once per key press and synchronizes the UI with the active Wasm engine.
+      if (event.code === 'KeyG' && !typing) {
+        event.preventDefault();
+        if (!event.repeat) {
+          const nextGearDown = !landingGearDownRef.current;
+          landingGearDownRef.current = nextGearDown;
+          setLandingGearDown(nextGearDown);
+          engineInstance?.setLandingGearDown(nextGearDown);
+          setStatus(`Landing gear ${nextGearDown ? 'DOWN' : 'UP'}`);
+        }
+        return;
+      }
       if (event.code === 'KeyN' && !typing) {
         event.preventDefault();
         if (!event.repeat) {
@@ -1195,6 +1222,8 @@ export default function Home() {
           Number(startingAltitudeInput),
           Number(startingHeadingInput),
         );
+        // Match the fresh engine's physical gear state to the initial HUD state.
+        engineInstance.setLandingGearDown(landingGearDownRef.current);
         engineRef.current = engineInstance;
         wasmModuleRef.current = wasmModule;
         setStatus('');
@@ -1227,7 +1256,11 @@ export default function Home() {
             if (keysPressed.has('ShiftLeft') || keysPressed.has('ShiftRight')) {
               throttleRef.current = Math.min(1.0, throttleRef.current + 0.4 * clampedDt);
             }
-            if (keysPressed.has('ControlLeft') || keysPressed.has('ControlRight')) {
+            // Ctrl brakes during gear-down ground contact; otherwise it remains throttle-down.
+            const brakePressed =
+              keysPressed.has('ControlLeft') || keysPressed.has('ControlRight');
+            engineInstance.setBrakeInput(brakePressed);
+            if (brakePressed && !engineInstance.getOnGround()) {
               throttleRef.current = Math.max(0.0, throttleRef.current - 0.4 * clampedDt);
             }
 
@@ -1872,6 +1905,7 @@ export default function Home() {
             heading={heading}
             airspeed={airspeed}
             crashed={crashed}
+            landingGearDown={landingGearDown}
             localPlayerId={localPlayerId}
             localPoseRef={localPoseRef}
             localMissilesRef={localMissilesRef}

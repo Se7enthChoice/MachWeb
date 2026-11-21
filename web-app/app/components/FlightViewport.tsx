@@ -40,6 +40,8 @@ interface FlightViewportProps {
   heading: number;
   airspeed: number;
   crashed: boolean;
+  // Display the physical gear state supplied by the active simulator.
+  landingGearDown: boolean;
   localPlayerId: string;
   localPoseRef: RefObject<LocalPose | null>;
   localMissilesRef: RefObject<MissileTelemetry[]>;
@@ -170,6 +172,8 @@ const CLOUD_MIN_BASE_FEET = 10000;
 const PRECIPITATION_PARTICLE_COUNT = 1500;
 const RAIN_STREAK_LENGTH = 6;
 const VISIBILITY_FOG_SCALE = 1.5;
+// Keep the camera above sampled terrain even before the simulator's wheel-contact state updates.
+const CAMERA_TERRAIN_CLEARANCE_FEET = 15;
 const CELESTIAL_DISTANCE = 1800;
 const LIGHT_DISTANCE = 1600;
 const FOG_NEAR = 300;
@@ -458,6 +462,41 @@ function terrainColor(elevationMeters: number): THREE.Color {
   if (elevationMeters < 2000) return terrainColors[3];
   if (elevationMeters < 3500) return terrainColors[4];
   return terrainColors[5];
+}
+
+// Bilinearly samples the same height grid used to render terrain for camera clearance.
+function getTerrainElevationFeet(
+  grid: TerrainGrid | null,
+  xFeet: number,
+  zFeet: number,
+): number {
+  if (!grid) return 0;
+  const gridX = (xFeet - grid.originXFeet) / grid.spacingXFeet;
+  const gridZ = (zFeet - grid.originZFeet) / grid.spacingZFeet;
+  if (
+    !Number.isFinite(gridX) ||
+    !Number.isFinite(gridZ) ||
+    gridX < 0 ||
+    gridZ < 0 ||
+    gridX > grid.width - 1 ||
+    gridZ > grid.height - 1
+  ) {
+    return 0;
+  }
+
+  const x0 = Math.floor(gridX);
+  const z0 = Math.floor(gridZ);
+  const x1 = Math.min(x0 + 1, grid.width - 1);
+  const z1 = Math.min(z0 + 1, grid.height - 1);
+  const fractionX = gridX - x0;
+  const fractionZ = gridZ - z0;
+  const northWest = grid.heightsMeters[z0 * grid.width + x0];
+  const northEast = grid.heightsMeters[z0 * grid.width + x1];
+  const southWest = grid.heightsMeters[z1 * grid.width + x0];
+  const southEast = grid.heightsMeters[z1 * grid.width + x1];
+  const north = northWest + (northEast - northWest) * fractionX;
+  const south = southWest + (southEast - southWest) * fractionX;
+  return (north + (south - north) * fractionZ) * feetPerMeter;
 }
 
 // Interpolates angles over the shortest path across the 0/360-degree boundary.
@@ -1128,6 +1167,7 @@ export default function FlightViewport({
   heading,
   airspeed,
   crashed,
+  landingGearDown,
   localPlayerId,
   localPoseRef,
   localMissilesRef,
@@ -1153,6 +1193,7 @@ export default function FlightViewport({
   const simulationTimeRef = useRef(simulationTimeMinutes);
   const weatherRef = useRef(weather);
   const terrainOriginRef = useRef(terrainOrigin);
+  const terrainGridRef = useRef(terrainGrid);
   const localPlayerIdRef = useRef(localPlayerId);
   const fallbackGroundRef = useRef<THREE.Group | null>(null);
   const remoteAircraftRef = useRef(new Map<string, RemoteAircraftInstance>());
@@ -1565,9 +1606,16 @@ export default function FlightViewport({
       const now = frameTime ?? performance.now();
       const pose = localPoseRef.current;
       if (pose) {
+        // Clamp the rendered camera independently of gear state to prevent terrain clipping.
+        const groundElevation = getTerrainElevationFeet(
+          terrainGridRef.current,
+          pose.posX,
+          pose.posZ,
+        );
         camera.position.set(
           pose.posX * visualScale,
-          pose.altitude * visualScale,
+          Math.max(pose.altitude, groundElevation + CAMERA_TERRAIN_CLEARANCE_FEET) *
+            visualScale,
           pose.posZ * visualScale,
         );
         camera.rotation.order = 'YXZ';
@@ -2292,6 +2340,10 @@ export default function FlightViewport({
   }, [terrainOrigin]);
 
   useEffect(() => {
+    terrainGridRef.current = terrainGrid;
+  }, [terrainGrid]);
+
+  useEffect(() => {
     localPlayerIdRef.current = localPlayerId;
   }, [localPlayerId]);
 
@@ -2571,7 +2623,10 @@ export default function FlightViewport({
   useEffect(() => {
     if (!cameraRef.current) return;
 
-    const visualAlt = altitude * visualScale;
+    const visualAlt = Math.max(
+      altitude,
+      getTerrainElevationFeet(terrainGrid, posX, posZ) + CAMERA_TERRAIN_CLEARANCE_FEET,
+    ) * visualScale;
     const worldX = posX * visualScale;
     const worldZ = posZ * visualScale;
     cameraRef.current.position.set(worldX, visualAlt, worldZ);
@@ -2579,7 +2634,7 @@ export default function FlightViewport({
     cameraRef.current.rotation.y = -THREE.MathUtils.degToRad(heading);
     cameraRef.current.rotation.x = THREE.MathUtils.degToRad(pitch);
     cameraRef.current.rotation.z = -THREE.MathUtils.degToRad(roll);
-  }, [posX, posZ, altitude, pitch, roll, heading]);
+  }, [posX, posZ, altitude, pitch, roll, heading, terrainGrid]);
 
   // Creates/removes remote aircraft and buffers fresh samples for interpolation.
   useEffect(() => {
@@ -2701,6 +2756,9 @@ export default function FlightViewport({
         <div>PITCH {pitch.toFixed(0)}° · ROLL {roll.toFixed(0)}°</div>
         <div>
           THR {throttle.toFixed(0)}% · VS {verticalSpeed.toFixed(0)} FT/MIN
+        </div>
+        <div>
+          GEAR {landingGearDown ? 'DOWN' : 'UP'} · G TOGGLE
         </div>
       </div>
     </div>

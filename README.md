@@ -138,7 +138,8 @@ Open your browser and navigate to http://localhost:3000.
 - **W / S**: Pitch up / down
 - **A / D**: Bank for turns
 - **Q / E**: Rudder yaw / sideslip
-- **Shift / Ctrl**: Increase / decrease throttle
+- **G**: Toggle landing gear
+- **Shift / Ctrl**: Increase throttle / decrease throttle in flight, brake on the ground
 - **N**: Cycle active radar tracks and set the primary target
 - **M / I**: Launch a radar-guided / infrared-guided missile
 - **C / F**: Dispense chaff / flare
@@ -152,7 +153,7 @@ A real-time 24-hour day/night cycle starts at the selected time, with sunrise at
 Preflight weather offers **SUN**, **RAIN**, **SNOW**, **LIGHTNING STORM**, and **REAL**, with REAL selected by default. In multiplayer, the host selects the shared preset and joiners receive it; REAL conditions are still fetched locally for each aircraft. Open-Meteo is queried at the aircraft's current coordinates immediately and every minute, outside peer telemetry. Its update status appears below the **END FLIGHT** button. Wind changes the aircraft's ground track while the flight model continues to use air-relative velocity for aerodynamic forces. Clouds are rendered as world-anchored volumes using a custom GLSL ray marcher over a generated 3D Perlin-Worley noise texture; precipitation particle density scales with the reported precipitation rate, snow uses drifting flakes, and storm flashes and visibility-based fog are rendered in the Three.js world.
 
 The simulation advances with the browser animation loop and bounds large frame deltas to keep the flight model stable after pauses or tab switches.
-Pitch, roll, and rudder controls have speed-sensitive response and aerodynamic damping. Pitch input applies an aerodynamic moment around the aircraft's rolled lateral axis rather than a fixed rotation rate, with pitch authority reduced at high angles of attack. Lift responds to the angle of attack between aircraft attitude and the flight path, so brief differences between nose attitude and climb or descent are possible during maneuvers. Bank produces sustained turns; rudder introduces a damped sideslip rather than directly steering the flight path. Vertical speed is limited to keep extreme climbs and dives recoverable.
+Pitch, roll, and rudder controls have speed-sensitive response and aerodynamic damping. Pitch input applies an aerodynamic moment around the aircraft's rolled lateral axis rather than a fixed rotation rate, with pitch authority reduced at high angles of attack. Lift responds to the angle of attack between aircraft attitude and the flight path, so brief differences between nose attitude and climb or descent are possible during maneuvers. Bank produces sustained turns; rudder introduces a damped sideslip rather than directly steering the flight path. Vertical speed is limited to keep extreme climbs and dives recoverable. Landing gear are down by default, provide 15 ft of terrain clearance, conform roll to the local slope, and absorb touchdowns below the safe sink-rate threshold; pressing **G** toggles the gear. Pilot pitch input is never overwritten during takeoff rotation, and the camera retains an independent terrain-clearance guard.
 
 ## Airborne Radar
 
