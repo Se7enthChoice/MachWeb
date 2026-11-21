@@ -167,7 +167,7 @@ const MAX_CONCURRENT_IMAGERY_REQUESTS = 8;
 const CLOUD_VOLUME_TILE_SIZE = 1000;
 const CLOUD_VOLUME_HALF_SIZE = 1800;
 const CLOUD_NOISE_SIZE = 32;
-const CLOUD_RAYMARCH_STEPS = 48;
+const CLOUD_RAYMARCH_STEPS = 24;
 const CLOUD_MIN_BASE_FEET = 10000;
 const PRECIPITATION_PARTICLE_COUNT = 1500;
 const RAIN_STREAK_LENGTH = 6;
@@ -1304,6 +1304,9 @@ export default function FlightViewport({
     scene.add(sunMarker, moonMarker);
 
     const cloudNoiseTexture = createCloudNoiseTexture();
+    const cloudBounds = new THREE.Box3();
+    const cloudFrustum = new THREE.Frustum();
+    const cloudProjectionView = new THREE.Matrix4();
     const cloudMaterial = new THREE.ShaderMaterial({
       glslVersion: THREE.GLSL3,
       uniforms: {
@@ -1399,6 +1402,7 @@ export default function FlightViewport({
     let cloudSignature = '';
     let cloudCellX = Number.NaN;
     let cloudCellZ = Number.NaN;
+    let cloudCoverageEnabled = false;
     let precipitationInitializedCount = 0;
     let lightningUntil = 0;
     let nextLightningAt = performance.now() + 4000 + Math.random() * 8000;
@@ -1423,6 +1427,8 @@ export default function FlightViewport({
       const maxZ = centerZ + CLOUD_VOLUME_HALF_SIZE;
       const uniforms = cloudMaterial.uniforms;
 
+      cloudBounds.min.set(minX, minY, minZ);
+      cloudBounds.max.set(maxX, maxY, maxZ);
       cloudVolume.position.set(centerX, cloudBase + cloudDepth * 0.5, centerZ);
       cloudVolume.scale.set(
         CLOUD_VOLUME_HALF_SIZE * 2,
@@ -1443,7 +1449,8 @@ export default function FlightViewport({
         currentWeather.kind === 'storm' ? 0x78838d :
           currentWeather.kind === 'rain' ? 0x9ba8b2 : 0xe9f0f3,
       );
-      cloudVolume.visible = currentWeather.cloudCoverPercent > 8;
+      cloudCoverageEnabled = currentWeather.cloudCoverPercent > 8;
+      cloudVolume.visible = cloudCoverageEnabled;
     };
 
     const handleResize = () => {
@@ -1623,6 +1630,7 @@ export default function FlightViewport({
         camera.rotation.x = THREE.MathUtils.degToRad(pose.pitch);
         camera.rotation.z = -THREE.MathUtils.degToRad(pose.roll);
       }
+      camera.updateMatrixWorld();
       const timeMinutes = simulationTimeRef.current;
       const frameSeconds = Math.min(Math.max((now - previousFrameTime) / 1000, 0), 0.1);
       previousFrameTime = now;
@@ -1645,6 +1653,9 @@ export default function FlightViewport({
         cloudCellX = nextCloudCellX;
         cloudCellZ = nextCloudCellZ;
       }
+      cloudProjectionView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      cloudFrustum.setFromProjectionMatrix(cloudProjectionView);
+      cloudVolume.visible = cloudCoverageEnabled && cloudFrustum.intersectsBox(cloudBounds);
 
       const isSnowing = currentWeather.snowCentimetersPerHour > 0.02;
       const isPrecipitating =
@@ -2179,7 +2190,8 @@ export default function FlightViewport({
         .lerp(TWILIGHT_SKY, twilight)
         .lerp(DAY_SKY, daylight);
       const cloudCover = THREE.MathUtils.clamp(currentWeather.cloudCoverPercent / 100, 0, 1);
-      sky.lerp(cloudySky, cloudCover * 0.5);
+      const cloudLighting = Math.max(daylight, twilight * 0.3);
+      sky.lerp(cloudySky, cloudCover * 0.5 * cloudLighting);
       if (lightningActive) sky.lerp(lightningSky, 0.62);
 
       scene.background = sky;
