@@ -1,4 +1,6 @@
+#ifdef __EMSCRIPTEN__
 #include <emscripten/bind.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -7,6 +9,7 @@
 #include "fm_aircraft.h"
 #include "ws_msl.h"
 #include "ws_radar.h"
+#include "ws_gun.h"
 
 // Coordinates simulation subsystems and exposes the stable WebAssembly API.
 class SimEngine {
@@ -15,6 +18,7 @@ private:
     FlightModel aircraft;
     Radar radar;
     MissileSystem missiles;
+    Gun gun;
     bool radarEnabled = true;
 
 public:
@@ -62,9 +66,14 @@ public:
         if (!radarEnabled) return false;
         return radar.addTarget(id, posX, altitude, posZ);
     }
-    void clearMissileTargets() { missiles.clearAircraftTargets(); }
-    bool addMissileTarget(unsigned int id, float posX, float altitude, float posZ) {
-        return missiles.addAircraftTarget(id, posX, altitude, posZ);
+    void clearAircraftTargets() {
+        missiles.clearAircraftTargets();
+        gun.ClearTargets();
+    }
+    bool addAircraftTarget(unsigned int id, float posX, float altitude, float posZ) {
+        const bool missileAdded = missiles.addAircraftTarget(id, posX, altitude, posZ);
+        const bool gunAdded = gun.AddTarget(id, posX, altitude, posZ);
+        return missileAdded && gunAdded;
     }
     // The browser refreshes remote decoys each frame; IDs 1 and 2 match the public wire format.
     void clearCountermeasureTargets() { missiles.clearCountermeasureTargets(); }
@@ -120,6 +129,9 @@ public:
             aircraft.getHeading(),
             aircraft.getPitch(),
             radar);
+    }
+    int getMissileAmmo(unsigned int typeId) const {
+        return missiles.getAmmo(typeId);
     }
     // Applies a confirmed remote missile hit using the aircraft's standard crash timer.
     void applyMissileImpact() { aircraft.applyMissileImpact(); }
@@ -190,6 +202,24 @@ public:
     bool getMissileTriggersRwr(int index) const { return missiles.getTriggersRwr(index); }
     // These compact getters are serialized into peer telemetry and consumed by the viewport.
     int getCountermeasureCount() const { return missiles.getCountermeasureCount(); }
+    int getCountermeasureAmmo(unsigned int typeId) const {
+        if (typeId == static_cast<unsigned int>(CountermeasureType::Chaff)) {
+            return missiles.getChaffRemaining();
+        }
+        if (typeId == static_cast<unsigned int>(CountermeasureType::Flare)) {
+            return missiles.getFlaresRemaining();
+        }
+        return 0;
+    }
+    float getCountermeasureCooldown(unsigned int typeId) const {
+        if (typeId == static_cast<unsigned int>(CountermeasureType::Chaff)) {
+            return missiles.getCountermeasureCooldown(CountermeasureType::Chaff);
+        }
+        if (typeId == static_cast<unsigned int>(CountermeasureType::Flare)) {
+            return missiles.getCountermeasureCooldown(CountermeasureType::Flare);
+        }
+        return 0.0f;
+    }
     unsigned int getCountermeasureId(int index) const {
         return missiles.getCountermeasureId(index);
     }
@@ -202,8 +232,21 @@ public:
     }
     float getCountermeasurePosZ(int index) const { return missiles.getCountermeasurePosZ(index); }
     float getCountermeasureAge(int index) const { return missiles.getCountermeasureAge(index); }
+
+    unsigned int shootGun() {
+        return gun.Shoot(
+            aircraft.getPosX(),
+            aircraft.getAltitude(),
+            aircraft.getPosZ(),
+            aircraft.getHeading(),
+            aircraft.getPitch());
+    }
+    int getGunAmmo() const { return gun.GetAmmo(); }
+    float getGunFireRateRpm() const { return gun.GetFireRateRpm(); }
+    void setGunAmmo(int newAmmo) { gun.SetAmmo(newAmmo); }
 };
 
+#ifdef __EMSCRIPTEN__
 // Binds the simulation facade methods used by the web application.
 EMSCRIPTEN_BINDINGS(sim_engine) {
     emscripten::class_<SimEngine>("SimEngine")
@@ -214,21 +257,21 @@ EMSCRIPTEN_BINDINGS(sim_engine) {
         .function("setRollInput", &SimEngine::setRollInput)
         .function("setYawInput", &SimEngine::setYawInput)
         .function("setThrottle", &SimEngine::setThrottle)
-        // Export gear and brake controls and ground state to the browser.
         .function("setLandingGearDown", &SimEngine::setLandingGearDown)
         .function("setBrakeInput", &SimEngine::setBrakeInput)
         .function("setWind", &SimEngine::setWind)
         .function("setRadarEnabled", &SimEngine::setRadarEnabled)
         .function("clearRadarTargets", &SimEngine::clearRadarTargets)
         .function("addRadarTarget", &SimEngine::addRadarTarget)
-        .function("clearMissileTargets", &SimEngine::clearMissileTargets)
-        .function("addMissileTarget", &SimEngine::addMissileTarget)
+        .function("clearAircraftTargets", &SimEngine::clearAircraftTargets)
+        .function("addAircraftTarget", &SimEngine::addAircraftTarget)
         // Expose validated remote decoy updates and local dispenser controls to JavaScript.
         .function("clearCountermeasureTargets", &SimEngine::clearCountermeasureTargets)
         .function("addCountermeasureTarget", &SimEngine::addCountermeasureTarget)
         .function("deployChaff", &SimEngine::deployChaff)
         .function("deployFlare", &SimEngine::deployFlare)
         .function("launchMissile", &SimEngine::launchMissile)
+        .function("getMissileAmmo", &SimEngine::getMissileAmmo)
         .function("setTerrainData", &SimEngine::setTerrainData)
         .function("clearTerrainData", &SimEngine::clearTerrainData)
         .function("getPosX", &SimEngine::getPosX)
@@ -270,5 +313,12 @@ EMSCRIPTEN_BINDINGS(sim_engine) {
         .function("getCountermeasurePosX", &SimEngine::getCountermeasurePosX)
         .function("getCountermeasureAltitude", &SimEngine::getCountermeasureAltitude)
         .function("getCountermeasurePosZ", &SimEngine::getCountermeasurePosZ)
-        .function("getCountermeasureAge", &SimEngine::getCountermeasureAge);
+        .function("getCountermeasureAge", &SimEngine::getCountermeasureAge)
+        .function("getCountermeasureAmmo", &SimEngine::getCountermeasureAmmo)
+        .function("getCountermeasureCooldown", &SimEngine::getCountermeasureCooldown)
+        .function("shootGun", &SimEngine::shootGun)
+        .function("getGunAmmo", &SimEngine::getGunAmmo)
+        .function("getGunFireRateRpm", &SimEngine::getGunFireRateRpm)
+        .function("setGunAmmo", &SimEngine::setGunAmmo);
 }
+    #endif

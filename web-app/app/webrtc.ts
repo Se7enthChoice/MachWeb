@@ -22,6 +22,7 @@ export interface FlightTelemetry {
   sourceAgeSeconds?: number;
   radarDetectedPlayerIds?: string[];
   missiles?: MissileTelemetry[];
+  gunHits?: GunHitTelemetry[];
   countermeasures?: CountermeasureTelemetry[];
 }
 
@@ -47,6 +48,11 @@ export interface MissileTelemetry {
 }
 
 // Compact decoy snapshots replicate seeker type, world position, and age to peers.
+export interface GunHitTelemetry {
+  gunHitId: number;
+  impactPlayerId: string;
+}
+
 export interface CountermeasureTelemetry {
   countermeasureId: number;
   typeId: 1 | 2; // Stable IDs shared with the C++ simulation: chaff=1, flare=2.
@@ -197,6 +203,20 @@ function isFlightTelemetry(value: unknown): value is FlightTelemetry {
             missile.impactPlayerId.length <= 64)),
       ));
 
+  const validGunHits =
+    value.gunHits === undefined ||
+    (Array.isArray(value.gunHits) &&
+      value.gunHits.length <= 64 &&
+      value.gunHits.every(gunHit =>
+        isRecord(gunHit) &&
+        typeof gunHit.gunHitId === 'number' &&
+        Number.isSafeInteger(gunHit.gunHitId) &&
+        gunHit.gunHitId > 0 &&
+        typeof gunHit.impactPlayerId === 'string' &&
+        gunHit.impactPlayerId.length > 0 &&
+        gunHit.impactPlayerId.length <= 64,
+      ));
+
   // Bound remote decoy count and age so stale or malformed signatures cannot persist.
   const validCountermeasures =
     value.countermeasures === undefined ||
@@ -250,6 +270,7 @@ function isFlightTelemetry(value: unknown): value is FlightTelemetry {
             typeof playerId === 'string' && playerId.length > 0 && playerId.length <= 64,
           ))) &&
     validMissiles &&
+    validGunHits &&
     validCountermeasures
   );
 }

@@ -31,8 +31,8 @@ void FlightModel::setInitialConditions(float initialAltitude, float initialHeadi
     verticalSpeed = 0.0f;
     crashTimeRemaining = 0.0f;
     onGround = false;
-    // Each new flight starts with deployed gear and no pending takeoff rotation.
-    landingGearDown = true;
+    // Each new flight starts with retracted gear and no pending takeoff rotation.
+    landingGearDown = false;
     gearRotationRequested = false;
 }
 

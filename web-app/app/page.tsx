@@ -40,6 +40,7 @@ import {
 import type {
   CountermeasureTelemetry,
   FlightTelemetry,
+  GunHitTelemetry,
   MissileTelemetry,
   ReceivedFlightTelemetry,
 } from './webrtc';
@@ -81,8 +82,8 @@ interface SimEngineInstance {
   setRadarEnabled(enabled: boolean): void;
   clearRadarTargets(): void;
   addRadarTarget(id: number, posX: number, altitude: number, posZ: number): boolean;
-  clearMissileTargets(): void;
-  addMissileTarget(id: number, posX: number, altitude: number, posZ: number): boolean;
+  clearAircraftTargets(): void;
+  addAircraftTarget(id: number, posX: number, altitude: number, posZ: number): boolean;
   clearCountermeasureTargets(): void;
   addCountermeasureTarget(
     id: number,
@@ -103,6 +104,7 @@ interface SimEngineInstance {
   getRadarScanAzimuth(): number;
   getRadarScanBar(): number;
   launchMissile(typeId: number, selectedTargetId: number): number;
+  getMissileAmmo(typeId: number): number;
   getMissileCount(): number;
   getMissileId(index: number): number;
   getMissileTypeId(index: number): number;
@@ -123,7 +125,17 @@ interface SimEngineInstance {
   getCountermeasurePosZ(index: number): number;
   getCountermeasureAge(index: number): number;
   applyMissileImpact(): void;
+  shootGun(): number;
+  getGunAmmo(): number;
+  getGunFireRateRpm(): number;
+  setGunAmmo(ammo: number): void;
+  getCountermeasureAmmo(typeId: number): number;
+  getCountermeasureCooldown(typeId: number): number;
   delete(): void;
+}
+
+interface ActiveGunHit extends GunHitTelemetry {
+  expiresAt: number;
 }
 
 interface SimEngineModule {
@@ -148,6 +160,37 @@ const MAX_RECEIVED_TELEMETRY_SAMPLES = 64;
 const MAX_TELEMETRY_BUFFERED_BYTES = 16 * 1024;
 const REAL_WEATHER_POLL_INTERVAL_MS = 60 * 1000;
 const ADSB_API_KEY_SESSION_STORAGE_KEY = 'machweb.adsbApiKey';
+
+type WeaponSelection = 'gun' | 'asraam' | 'amraam' | 'chaff' | 'flare' | null;
+
+const WEAPON_LABELS: Record<Exclude<WeaponSelection, null>, string> = {
+  gun: 'Gun',
+  asraam: 'IR ASRAAM',
+  amraam: 'Radar AMRAAM',
+  chaff: 'Chaff',
+  flare: 'Flares',
+};
+
+const INITIAL_WEAPON_AMMO: Record<Exclude<WeaponSelection, null>, number> = {
+  gun: 150,
+  asraam: 4,
+  amraam: 4,
+  chaff: 24,
+  flare: 12,
+};
+
+const getWeaponAmmo = (
+  weapon: WeaponSelection,
+  engine: SimEngineInstance | null,
+): number | null => {
+  if (weapon === null) return null;
+  if (!engine) return INITIAL_WEAPON_AMMO[weapon];
+  if (weapon === 'gun') return engine.getGunAmmo();
+  if (weapon === 'asraam' || weapon === 'amraam') {
+    return engine.getMissileAmmo(weapon === 'asraam' ? 2 : 1);
+  }
+  return engine.getCountermeasureAmmo(weapon === 'chaff' ? 1 : 2);
+};
 
 // Generates a UUID without requiring a secure context. crypto.randomUUID() is
 // restricted to secure contexts, but getRandomValues() is available on HTTP
@@ -379,8 +422,10 @@ export default function Home() {
   const [heading, setHeading] = useState<number>(0);
   const [verticalSpeed, setVerticalSpeed] = useState<number>(0);
   const [crashed, setCrashed] = useState(false);
+  const [selectedWeaponAmmo, setSelectedWeaponAmmo] = useState<number | null>(null);
+  const [selectedWeapon, setSelectedWeapon] = useState<WeaponSelection>(null);
   // React state drives the HUD; the ref lets the key handler and Wasm startup read synchronously.
-  const [landingGearDown, setLandingGearDown] = useState(true);
+  const [landingGearDown, setLandingGearDown] = useState(false);
   const [radarEnabled, setRadarEnabled] = useState(true);
   const [radarContacts, setRadarContacts] = useState<RadarContact[]>([]);
   const [radarScanAzimuth, setRadarScanAzimuth] = useState(-60);
@@ -398,7 +443,8 @@ export default function Home() {
   // Mutable values shared with callbacks and animation loops without rerendering.
   const throttleRef = useRef(0.43);
   // Keep the current gear state available before React renders the HUD update.
-  const landingGearDownRef = useRef(true);
+  const landingGearDownRef = useRef(false);
+  const selectedWeaponRef = useRef<WeaponSelection>(null);
   const weatherRef = useRef(weather);
   const radarEnabledRef = useRef(radarEnabled);
   const engineRef = useRef<SimEngineInstance | null>(null);
@@ -431,6 +477,9 @@ export default function Home() {
   const missileLaunchTypeRef = useRef(1);
   const countermeasureDeployRequestedRef = useRef<'chaff' | 'flare' | null>(null);
   const processedMissileImpactsRef = useRef(new Map<string, number>());
+  const processedGunHitsRef = useRef(new Map<string, number>());
+  const localGunHitsRef = useRef<ActiveGunHit[]>([]);
+  const nextGunHitIdRef = useRef(1);
   const terrainNeighborhoodKey = getTerrainNeighborhoodKey(terrainOrigin, posX, posZ);
 
   const adsbTelemetries = useMemo<FlightTelemetry[]>(
@@ -1011,9 +1060,12 @@ export default function Home() {
     setRoll(0);
     setHeading(startingHeading);
     setVerticalSpeed(0);
-    // A new flight always begins with the landing gear deployed.
-    landingGearDownRef.current = true;
-    setLandingGearDown(true);
+    // A new flight begins with gear up and no weapon selected.
+    landingGearDownRef.current = false;
+    setLandingGearDown(false);
+    setSelectedWeaponAmmo(null);
+    selectedWeaponRef.current = null;
+    setSelectedWeapon(null);
     localPoseRef.current = null;
     const startTimeMinutes =
       multiplayerRole === 'join' && multiplayerConnected
@@ -1048,6 +1100,8 @@ export default function Home() {
     missileLaunchTypeRef.current = 1;
     countermeasureDeployRequestedRef.current = null;
     processedMissileImpactsRef.current.clear();
+    processedGunHitsRef.current.clear();
+    localGunHitsRef.current = [];
     primaryTargetIdRef.current = null;
     setPrimaryTargetId(null);
     if (!playerIdRef.current) playerIdRef.current = createId();
@@ -1075,16 +1129,21 @@ export default function Home() {
     setRoll(0);
     setHeading(0);
     setVerticalSpeed(0);
-    // Restore the default gear state when returning to preflight.
-    landingGearDownRef.current = true;
-    setLandingGearDown(true);
+    // Restore the default gear-up state when returning to preflight.
+    landingGearDownRef.current = false;
+    setLandingGearDown(false);
     setCrashed(false);
+    selectedWeaponRef.current = null;
+    setSelectedWeapon(null);
+    setSelectedWeaponAmmo(null);
     localMissilesRef.current = [];
     localCountermeasuresRef.current = [];
     missileLaunchRequestedRef.current = false;
     missileLaunchTypeRef.current = 1;
     countermeasureDeployRequestedRef.current = null;
     processedMissileImpactsRef.current.clear();
+    processedGunHitsRef.current.clear();
+    localGunHitsRef.current = [];
     setAdsbStatus('ADS-B off - add an API key in preflight.');
     setWeatherPreset('real');
     weatherPresetRef.current = 'real';
@@ -1124,6 +1183,25 @@ export default function Home() {
     let engineInstance: SimEngineInstance | null = null;
 
     const keysPressed = new Set<string>();
+    let gunFireCooldown = 0;
+
+    const fireGun = (): void => {
+      if (!engineInstance) return;
+      const hitTargetId = engineInstance.shootGun();
+      setSelectedWeaponAmmo(engineInstance.getGunAmmo());
+      const impactPlayerId = radarTargetPlayerIdsRef.current.get(hitTargetId);
+      if (!impactPlayerId) return;
+      const now = performance.now();
+      localGunHitsRef.current = [
+        ...localGunHitsRef.current.filter(hit => hit.expiresAt > now),
+        {
+          gunHitId: nextGunHitIdRef.current,
+          impactPlayerId,
+          expiresAt: now + 3000,
+        },
+      ];
+      nextGunHitIdRef.current += 1;
+    };
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.code)) {
@@ -1133,6 +1211,16 @@ export default function Home() {
       const typing =
         target instanceof HTMLElement &&
         (target.isContentEditable || target.closest('input, textarea, select'));
+      if (event.code === 'Backquote' && !typing) {
+        event.preventDefault();
+        if (!event.repeat) {
+          selectedWeaponRef.current = null;
+          setSelectedWeapon(null);
+          setSelectedWeaponAmmo(null);
+          setStatus('Weapon deselected.');
+        }
+        return;
+      }
       // G toggles once per key press and synchronizes the UI with the active Wasm engine.
       if (event.code === 'KeyG' && !typing) {
         event.preventDefault();
@@ -1142,6 +1230,42 @@ export default function Home() {
           setLandingGearDown(nextGearDown);
           engineInstance?.setLandingGearDown(nextGearDown);
           setStatus(`Landing gear ${nextGearDown ? 'DOWN' : 'UP'}`);
+        }
+        return;
+      }
+      const weaponSelection: WeaponSelection | null =
+        event.code === 'Digit1' ? 'gun' :
+          event.code === 'Digit2' ? 'asraam' :
+            event.code === 'Digit3' ? 'amraam' :
+              event.code === 'Digit8' ? 'chaff' :
+                event.code === 'Digit9' ? 'flare' :
+              null;
+      if (weaponSelection && !typing) {
+        event.preventDefault();
+        if (!event.repeat) {
+          selectedWeaponRef.current = weaponSelection;
+          setSelectedWeapon(weaponSelection);
+          setSelectedWeaponAmmo(getWeaponAmmo(weaponSelection, engineInstance));
+          setStatus(`${WEAPON_LABELS[weaponSelection]} selected. Press Enter to fire.`);
+        }
+        return;
+      }
+      if (event.code === 'Enter' && !typing) {
+        event.preventDefault();
+        keysPressed.add(event.code);
+        if (!event.repeat) {
+          const weapon = selectedWeaponRef.current;
+          if (weapon === 'gun') {
+            fireGun();
+            gunFireCooldown = engineInstance
+              ? 60 / engineInstance.getGunFireRateRpm()
+              : 0;
+          } else if (weapon === 'asraam' || weapon === 'amraam') {
+            missileLaunchTypeRef.current = weapon === 'asraam' ? 2 : 1;
+            missileLaunchRequestedRef.current = true;
+          } else if (weapon === 'chaff' || weapon === 'flare') {
+            countermeasureDeployRequestedRef.current = weapon;
+          }
         }
         return;
       }
@@ -1171,35 +1295,16 @@ export default function Home() {
           }
         }
       }
-      // Queue weapon actions here; the simulation loop applies them at its next tick.
-      if (event.code === 'KeyM' && !typing) {
-        event.preventDefault();
-        if (!event.repeat) {
-          missileLaunchTypeRef.current = 1;
-          missileLaunchRequestedRef.current = true;
-        }
-      }
-      if (event.code === 'KeyI' && !typing) {
-        event.preventDefault();
-        if (!event.repeat) {
-          missileLaunchTypeRef.current = 2;
-          missileLaunchRequestedRef.current = true;
-        }
-      }
-      if (event.code === 'KeyC' && !typing) {
-        event.preventDefault();
-        if (!event.repeat) countermeasureDeployRequestedRef.current = 'chaff';
-      }
-      if (event.code === 'KeyF' && !typing) {
-        event.preventDefault();
-        if (!event.repeat) countermeasureDeployRequestedRef.current = 'flare';
-      }
       keysPressed.add(event.code);
     };
     const handleKeyUp = (event: KeyboardEvent) => {
       keysPressed.delete(event.code);
+      if (event.code === 'Enter') gunFireCooldown = 0;
     };
-    const handleBlur = () => keysPressed.clear();
+    const handleBlur = () => {
+      keysPressed.clear();
+      gunFireCooldown = 0;
+    };
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
@@ -1218,11 +1323,12 @@ export default function Home() {
         if (disposed) return;
 
         engineInstance = new wasmModule.SimEngine();
+        engineInstance.setGunAmmo(150);
         engineInstance.setInitialConditions(
           Number(startingAltitudeInput),
           Number(startingHeadingInput),
         );
-        // Match the fresh engine's physical gear state to the initial HUD state.
+        // Match the fresh engine's gear-up state to the HUD.
         engineInstance.setLandingGearDown(landingGearDownRef.current);
         engineRef.current = engineInstance;
         wasmModuleRef.current = wasmModule;
@@ -1272,6 +1378,22 @@ export default function Home() {
               weatherRef.current.windEastKnots,
               weatherRef.current.windNorthKnots,
             );
+            if (keysPressed.has('Enter') && selectedWeaponRef.current === 'gun') {
+              const fireRateRpm = engineInstance.getGunFireRateRpm();
+              if (!Number.isFinite(fireRateRpm) || fireRateRpm <= 0) {
+                gunFireCooldown = 0;
+                setStatus('Gun unavailable: invalid fire rate.');
+              } else {
+                const shotIntervalSeconds = 60 / fireRateRpm;
+                gunFireCooldown -= clampedDt;
+                while (gunFireCooldown <= 0) {
+                  fireGun();
+                  gunFireCooldown += shotIntervalSeconds;
+                }
+              }
+            } else {
+              gunFireCooldown = 0;
+            }
             if (missileLaunchRequestedRef.current) {
               missileLaunchRequestedRef.current = false;
               const missileTypeId = missileLaunchTypeRef.current;
@@ -1283,6 +1405,10 @@ export default function Home() {
                 missileTypeId,
                 selectedTargetId ?? 0,
               );
+              const weaponForType = missileTypeId === 2 ? 'asraam' : 'amraam';
+              if (selectedWeaponRef.current === weaponForType) {
+                setSelectedWeaponAmmo(engineInstance.getMissileAmmo(missileTypeId));
+              }
               setStatus(
                 launchResult === 2
                   ? selectedTargetIsAdsb
@@ -1296,21 +1422,56 @@ export default function Home() {
                         ? 'Missile launch rejected: radar track is stale or no longer available.'
                         : launchResult === 5
                           ? 'Missile launch rejected: track is outside the 10 NM missile range.'
-                          : 'Missile launch rejected: invalid flight state.',
+                          : launchResult === 6
+                            ? 'Missile launch rejected: selected missile type is depleted.'
+                            : 'Missile launch rejected: invalid flight state.',
               );
+            }
+            const selectedCountermeasure =
+              selectedWeaponRef.current === 'chaff' || selectedWeaponRef.current === 'flare'
+                ? selectedWeaponRef.current
+                : null;
+            if (
+              keysPressed.has('Enter') &&
+              selectedCountermeasure !== null &&
+              engineInstance.getCountermeasureAmmo(
+                selectedCountermeasure === 'chaff' ? 1 : 2,
+              ) > 0 &&
+              engineInstance.getCountermeasureCooldown(
+                selectedCountermeasure === 'chaff' ? 1 : 2,
+              ) <= 0
+            ) {
+              countermeasureDeployRequestedRef.current = selectedCountermeasure;
             }
             if (countermeasureDeployRequestedRef.current !== null) {
               // Keep dispenser state changes on the simulation tick with missile launches.
               const countermeasureType = countermeasureDeployRequestedRef.current;
               countermeasureDeployRequestedRef.current = null;
+              const isHeld =
+                keysPressed.has('Enter') &&
+                selectedWeaponRef.current === countermeasureType;
               const deployed = countermeasureType === 'chaff'
                 ? engineInstance.deployChaff()
                 : engineInstance.deployFlare();
-              setStatus(
-                deployed
-                  ? `${countermeasureType === 'chaff' ? 'Chaff' : 'Flare'} deployed.`
-                  : `${countermeasureType === 'chaff' ? 'Chaff' : 'Flare'} unavailable: depleted, cooling down, or dispenser full.`,
-              );
+              if (deployed && selectedWeaponRef.current === countermeasureType) {
+                setSelectedWeaponAmmo(
+                  engineInstance.getCountermeasureAmmo(
+                    countermeasureType === 'chaff' ? 1 : 2,
+                  ),
+                );
+              }
+              if (deployed) {
+                setStatus(`${countermeasureType === 'chaff' ? 'Chaff' : 'Flare'} deployed.`);
+              } else if (
+                !isHeld ||
+                engineInstance.getCountermeasureAmmo(
+                  countermeasureType === 'chaff' ? 1 : 2,
+                ) <= 0
+              ) {
+                setStatus(
+                  `${countermeasureType === 'chaff' ? 'Chaff' : 'Flare'} unavailable: depleted, cooling down, or dispenser full.`,
+                );
+              }
             }
 
             // Refresh collision targets even if radar is powered off or has no acquired tracks.
@@ -1329,7 +1490,7 @@ export default function Home() {
                 Number(right.playerId.startsWith('adsb:')),
               )
               .slice(0, MAX_RADAR_TARGETS);
-            engineInstance.clearMissileTargets();
+            engineInstance.clearAircraftTargets();
             engineInstance.clearCountermeasureTargets();
             if (radarEnabledRef.current) engineInstance.clearRadarTargets();
             for (const target of recentAircraftTargets) {
@@ -1347,7 +1508,7 @@ export default function Home() {
                 radarTargetPlayerIdsRef.current.set(targetId, target.playerId);
               }
               const targetPosition = getLocalPosition(terrainOrigin, target);
-              if (!isAdsb && !engineInstance.addMissileTarget(
+              if (!isAdsb && !engineInstance.addAircraftTarget(
                 targetId,
                 targetPosition.posXFeet,
                 target.altitude,
@@ -1415,9 +1576,19 @@ export default function Home() {
                 processedMissileImpactsRef.current.set(impactKey, now);
                 engineInstance.applyMissileImpact();
               }
+              for (const gunHit of remote.gunHits ?? []) {
+                if (gunHit.impactPlayerId !== playerIdRef.current) continue;
+                const hitKey = `${remote.playerId}:${gunHit.gunHitId}`;
+                if (processedGunHitsRef.current.has(hitKey)) continue;
+                processedGunHitsRef.current.set(hitKey, now);
+                engineInstance.applyMissileImpact();
+              }
             }
             processedMissileImpactsRef.current.forEach((time, impactKey) => {
               if (now - time > 30_000) processedMissileImpactsRef.current.delete(impactKey);
+            });
+            processedGunHitsRef.current.forEach((time, hitKey) => {
+              if (now - time > 30_000) processedGunHitsRef.current.delete(hitKey);
             });
 
             const [
@@ -1575,6 +1746,9 @@ export default function Home() {
                       ),
                   ).filter((playerId): playerId is string => playerId !== undefined)
                 : [];
+              localGunHitsRef.current = localGunHitsRef.current.filter(
+                hit => hit.expiresAt > now,
+              );
               const telemetry: FlightTelemetry = {
                 playerId: playerIdRef.current,
                 isHost: multiplayerRole === 'host',
@@ -1594,6 +1768,10 @@ export default function Home() {
                 sampleTimeMs: currentTime,
                 radarDetectedPlayerIds,
                 missiles: readMissiles(),
+                gunHits: localGunHitsRef.current.map(({ gunHitId, impactPlayerId }) => ({
+                  gunHitId,
+                  impactPlayerId,
+                })),
                 countermeasures: readCountermeasures(),
               };
               telemetrySequenceRef.current += 1;
@@ -1905,6 +2083,10 @@ export default function Home() {
             heading={heading}
             airspeed={airspeed}
             crashed={crashed}
+            selectedWeaponAmmo={selectedWeaponAmmo}
+            selectedWeaponLabel={
+              selectedWeapon ? WEAPON_LABELS[selectedWeapon] : 'None'
+            }
             landingGearDown={landingGearDown}
             localPlayerId={localPlayerId}
             localPoseRef={localPoseRef}
@@ -1965,19 +2147,25 @@ export default function Home() {
               <strong className="text-emerald-400">Q / E</strong>: Rudder yaw / sideslip
             </div>
             <div>
-              <strong className="text-emerald-400">SHIFT / CTRL</strong>: Throttle up / down
+              <strong className="text-emerald-400">SHIFT / CTRL</strong>: Throttle up / down; Ctrl brakes on ground
+            </div>
+            <div>
+              <strong className="text-emerald-400">G</strong>: Toggle landing gear (starts up)
             </div>
             <div className="col-span-2">
               <strong className="text-emerald-400">N</strong>: Cycle nearest-first, then deselect target
             </div>
             <div className="col-span-2">
-              <strong className="text-emerald-400">M / I</strong>: Launch radar / infrared missile
+              <strong className="text-emerald-400">1 / 2 / 3 (top row)</strong>: Select gun / IR ASRAAM / Radar AMRAAM
             </div>
-            <div>
-              <strong className="text-emerald-400">C</strong>: Deploy chaff
+            <div className="col-span-2">
+              <strong className="text-emerald-400">8 / 9 (top row)</strong>: Select chaff / flares
             </div>
-            <div>
-              <strong className="text-emerald-400">F</strong>: Deploy flare
+            <div className="col-span-2">
+              <strong className="text-emerald-400">Enter</strong>: Fire selected; hold for gun / countermeasures (missiles fire once)
+            </div>
+            <div className="col-span-2">
+              <strong className="text-emerald-400">`</strong>: Deselect weapon
             </div>
           </div>
           <div className="mt-4 flex justify-end">

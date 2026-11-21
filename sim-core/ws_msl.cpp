@@ -108,6 +108,7 @@ int MissileSystem::launch(
     const Radar& radar) {
     const MissileTypeConfig* type = getTypeConfig(typeId);
     if (!type) return 0;
+    if (getAmmo(typeId) <= 0) return 6;
     if (!std::isfinite(posX) || !std::isfinite(altitude) || !std::isfinite(posZ) ||
         !std::isfinite(airspeedKnots) || !std::isfinite(heading) || !std::isfinite(pitch)) {
         return 0;
@@ -163,7 +164,24 @@ int MissileSystem::launch(
     missile.velocityZ = forward.z * launchSpeed;
     missile.lifetimeRemaining = type->lifetimeSeconds;
     missiles[missileIndex] = missile;
+    if (typeId == 1) {
+        --amraamRemaining;
+    } else {
+        --asraamRemaining;
+    }
     return missile.targetId == 0 ? 1 : 2;
+}
+
+int MissileSystem::getAmmo(std::uint32_t typeId) const {
+    if (typeId == 1) return amraamRemaining;
+    if (typeId == 2) return asraamRemaining;
+    return 0;
+}
+
+float MissileSystem::getCountermeasureCooldown(CountermeasureType type) const {
+    if (type == CountermeasureType::Chaff) return chaffCooldown;
+    if (type == CountermeasureType::Flare) return flareCooldown;
+    return 0.0f;
 }
 
 // Integrates each flight in bounded steps, steering toward its track and resolving fuses/hits.

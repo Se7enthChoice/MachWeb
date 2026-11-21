@@ -40,6 +40,8 @@ interface FlightViewportProps {
   heading: number;
   airspeed: number;
   crashed: boolean;
+  selectedWeaponAmmo: number | null;
+  selectedWeaponLabel: string;
   // Display the physical gear state supplied by the active simulator.
   landingGearDown: boolean;
   localPlayerId: string;
@@ -1167,6 +1169,8 @@ export default function FlightViewport({
   heading,
   airspeed,
   crashed,
+  selectedWeaponAmmo,
+  selectedWeaponLabel,
   landingGearDown,
   localPlayerId,
   localPoseRef,
@@ -2763,14 +2767,20 @@ export default function FlightViewport({
           CRASHED
         </div>
       )}
-      <div className="pointer-events-none absolute bottom-3 right-3 rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 text-right font-mono text-[10px] leading-4 text-zinc-200 backdrop-blur sm:text-xs">
-        <div>HDG {heading.toFixed(0)}° · ALT {altitude.toFixed(0)} FT · {airspeed.toFixed(0)} KT</div>
-        <div>PITCH {pitch.toFixed(0)}° · ROLL {roll.toFixed(0)}°</div>
-        <div>
-          THR {throttle.toFixed(0)}% · VS {verticalSpeed.toFixed(0)} FT/MIN
+      <div className="pointer-events-none absolute bottom-3 right-3 flex flex-col items-end gap-2">
+        <div className="rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 text-right font-mono text-[10px] leading-4 text-zinc-200 backdrop-blur sm:text-xs">
+          <div>WEAPON {selectedWeaponLabel.toUpperCase()}</div>
+          {selectedWeaponAmmo !== null && <div>AMMO {selectedWeaponAmmo}</div>}
         </div>
-        <div>
-          GEAR {landingGearDown ? 'DOWN' : 'UP'} · G TOGGLE
+        <div className="rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 text-right font-mono text-[10px] leading-4 text-zinc-200 backdrop-blur sm:text-xs">
+          <div>HDG {heading.toFixed(0)}° · ALT {altitude.toFixed(0)} FT · {airspeed.toFixed(0)} KT</div>
+          <div>PITCH {pitch.toFixed(0)}° · ROLL {roll.toFixed(0)}°</div>
+          <div>
+            THR {throttle.toFixed(0)}% · VS {verticalSpeed.toFixed(0)} FT/MIN
+          </div>
+          <div>
+            GEAR {landingGearDown ? 'DOWN' : 'UP'} · G TOGGLE
+          </div>
         </div>
       </div>
     </div>

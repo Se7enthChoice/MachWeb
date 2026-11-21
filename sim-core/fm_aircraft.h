@@ -17,8 +17,8 @@ private:
     float throttle = 0.43f;
     float crashTimeRemaining = 0.0f;
     bool onGround = false;
-    // Gear starts down; retracted gear removes the normal wheel-clearance allowance.
-    bool landingGearDown = true;
+    // Gear starts up; retracted gear removes the normal wheel-clearance allowance.
+    bool landingGearDown = false;
     // Keeps terrain alignment from cancelling a pilot-requested takeoff rotation.
     bool gearRotationRequested = false;
 

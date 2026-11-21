@@ -102,6 +102,8 @@ private:
     std::uint32_t nextCountermeasureId = 1;
     int chaffRemaining = 24;                // Inventory is finite for the current flight.
     int flaresRemaining = 12;
+    int asraamRemaining = 4;
+    int amraamRemaining = 4;
     float chaffCooldown = 0.0f;             // Seconds until each dispenser can fire again.
     float flareCooldown = 0.0f;
 
@@ -119,7 +121,7 @@ private:
     void detonate(Missile& missile, std::uint32_t impactTargetId = 0);
 
 public:
-    // Returns 0=invalid, 1=unguided, 2=guided, 3=no slot, 4=stale track, 5=out of range.
+    // Returns 0=invalid, 1=unguided, 2=guided, 3=no slot, 4=stale, 5=out of range, 6=depleted.
     int launch(
         std::uint32_t typeId,
         std::uint32_t selectedTargetId,
@@ -130,6 +132,8 @@ public:
         float heading,
         float pitch,
         const Radar& radar);
+    // Returns remaining store count for type 1=AMRAAM or 2=ASRAAM.
+    int getAmmo(std::uint32_t typeId) const;
     // Advances guidance, range/fuse checks, aircraft impacts, and explosion cleanup.
     void tick(float dt, const Terrain& terrain, const Radar& radar);
     // Replaces the collision list with fresh remote aircraft positions for the next tick.
@@ -171,6 +175,9 @@ public:
     bool getTriggersRwr(int index) const;
     // Compact snapshots expose only live local decoys; invalid indices return neutral values.
     int getCountermeasureCount() const;
+    int getChaffRemaining() const { return chaffRemaining; }
+    int getFlaresRemaining() const { return flaresRemaining; }
+    float getCountermeasureCooldown(CountermeasureType type) const;
     std::uint32_t getCountermeasureId(int index) const;
     std::uint32_t getCountermeasureType(int index) const;
     float getCountermeasurePosX(int index) const;
