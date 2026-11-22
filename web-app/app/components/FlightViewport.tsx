@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { getAircraftCoordinates, getLocalPosition, getSatelliteTileUrl } from '../terrain';
 import type { TerrainGrid, TerrainOrigin } from '../terrain';
 import { ADSB_POLL_INTERVAL_MS, ADSB_TRACK_TTL_MS } from '../adsb';
@@ -899,8 +900,20 @@ function createRemoteAircraft(
   return { aircraft, lights, pointLights };
 }
 
-// Builds a small forward-pointing missile model in its own local coordinate frame.
-function createMissile(): THREE.Group {
+// Uses the imported weapon model, falling back only when that model could not load.
+function createMissile(
+  typeId: number,
+  templates: Map<number, THREE.Group>,
+): THREE.Group {
+  const template = templates.get(typeId);
+  if (template) {
+    const missile = new THREE.Group();
+    const model = template.clone(true);
+    model.rotation.y = Math.PI;
+    missile.add(model);
+    return missile;
+  }
+
   const missile = new THREE.Group();
   const bodyMaterial = new THREE.MeshBasicMaterial({ color: 0xd1d5db });
   const body = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.022, 0.26, 8), bodyMaterial);
@@ -927,6 +940,7 @@ function createMissile(): THREE.Group {
 function disposeMissile(scene: THREE.Scene, missile: THREE.Group): void {
   scene.remove(missile);
   missile.traverse(object => {
+    if (object.userData.sharedMissileResource) return;
     if (!(object instanceof THREE.Mesh)) return;
     object.geometry.dispose();
     const materials = Array.isArray(object.material) ? object.material : [object.material];
@@ -1239,12 +1253,14 @@ export default function FlightViewport({
     const explosionEffects = explosionEffectsRef.current;
     const seenExplosions = seenExplosionsRef.current;
     const terrainTextureCache = terrainTextureCacheRef.current;
+    const missileModelTemplates = new Map<number, THREE.Group>();
+    let disposed = false;
 
     // 1. Scene
     const scene = new THREE.Scene();
     sceneRef.current = scene;
     scene.background = DAY_SKY.clone();
-    const tracerGeometry = new THREE.CylinderGeometry(0.002, 0.004, 1, 6);
+    const tracerGeometry = new THREE.CylinderGeometry(0.00132, 0.00264, 1, 6);
     const tracerMaterial = new THREE.MeshBasicMaterial({ color: 0xffc15e, fog: false });
     const tracers: GunTracerVisual[] = [];
     const seenTracers = new Map<string, number>();
@@ -1484,7 +1500,7 @@ export default function FlightViewport({
     const resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(currentMount);
 
-    let animId: number;
+    let animId = 0;
     let previousFrameTime = performance.now();
     const adsbTargetPosition = new THREE.Vector3();
     let daylightLevel = 1;
@@ -1523,7 +1539,7 @@ export default function FlightViewport({
         };
         const instance = missileInstances.get(key);
         if (!instance) {
-          const model = createMissile();
+          const model = createMissile(missile.typeId, missileModelTemplates);
           model.position.copy(worldPosition);
           model.rotation.order = 'YXZ';
           model.rotation.y = -THREE.MathUtils.degToRad(missile.heading);
@@ -2162,7 +2178,7 @@ export default function FlightViewport({
         activeLocalMissiles.add(key);
         let instance = missileInstances.get(key);
         if (!instance) {
-          const model = createMissile();
+          const model = createMissile(missile.typeId, missileModelTemplates);
           model.position.copy(sample.position);
           model.rotation.order = 'YXZ';
           model.rotation.y = -THREE.MathUtils.degToRad(sample.heading);
@@ -2364,8 +2380,57 @@ export default function FlightViewport({
 
       renderer.render(scene, camera);
     };
-    animate();
+    const disposeMissileTemplates = () => {
+      const geometries = new Set<THREE.BufferGeometry>();
+      const materials = new Set<THREE.Material>();
+      for (const template of missileModelTemplates.values()) {
+        template.traverse(object => {
+          if (!(object instanceof THREE.Mesh)) return;
+          geometries.add(object.geometry);
+          const meshMaterials = Array.isArray(object.material)
+            ? object.material
+            : [object.material];
+          meshMaterials.forEach(material => materials.add(material));
+        });
+      }
+      geometries.forEach(geometry => geometry.dispose());
+      materials.forEach(material => {
+        for (const value of Object.values(material)) {
+          if (value instanceof THREE.Texture) value.dispose();
+        }
+        material.dispose();
+      });
+      missileModelTemplates.clear();
+    };
+    const loadMissileModels = async () => {
+      const loader = new GLTFLoader();
+      const modelSources = [
+        { typeId: 1, name: 'AMRAAM', url: '/models/aim-120.glb' },
+        { typeId: 2, name: 'ASRAAM', url: '/models/aim-132.glb' },
+      ];
+      await Promise.all(modelSources.map(async ({ typeId, name, url }) => {
+        try {
+          const gltf = await loader.loadAsync(url);
+          gltf.scene.traverse(object => {
+            if (!(object instanceof THREE.Mesh)) return;
+            object.castShadow = true;
+            object.receiveShadow = true;
+            object.userData.sharedMissileResource = true;
+          });
+          missileModelTemplates.set(typeId, gltf.scene);
+        } catch (error) {
+          console.error(`Could not load the ${name} model from ${url}; using the fallback model.`, error);
+        }
+      }));
+      if (disposed) {
+        disposeMissileTemplates();
+        return;
+      }
+      animate();
+    };
+    void loadMissileModels();
     return () => {
+      disposed = true;
       resizeObserver.disconnect();
       cancelAnimationFrame(animId);
       cloudNoiseTexture.dispose();
@@ -2389,6 +2454,7 @@ export default function FlightViewport({
           object instanceof THREE.LineSegments ||
           object instanceof THREE.Points
         ) {
+          if (object.userData.sharedMissileResource) return;
           object.geometry.dispose();
           const materials = Array.isArray(object.material) ? object.material : [object.material];
           materials.forEach(material => {
@@ -2399,6 +2465,7 @@ export default function FlightViewport({
           });
         }
       });
+      disposeMissileTemplates();
       renderer.domElement.remove();
       renderer.dispose();
       rendererRef.current = null;
