@@ -2404,9 +2404,10 @@ export default function FlightViewport({
     };
     const loadMissileModels = async () => {
       const loader = new GLTFLoader();
+      const modelBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
       const modelSources = [
-        { typeId: 1, name: 'AMRAAM', url: '/models/aim-120.glb' },
-        { typeId: 2, name: 'ASRAAM', url: '/models/aim-132.glb' },
+        { typeId: 1, name: 'AMRAAM', url: `${modelBasePath}/models/aim-120.glb` },
+        { typeId: 2, name: 'ASRAAM', url: `${modelBasePath}/models/aim-132.glb` },
       ];
       await Promise.all(modelSources.map(async ({ typeId, name, url }) => {
         try {
