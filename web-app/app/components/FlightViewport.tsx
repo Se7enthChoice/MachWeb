@@ -9,6 +9,7 @@ import { ADSB_POLL_INTERVAL_MS, ADSB_TRACK_TTL_MS } from '../adsb';
 import type {
   CountermeasureTelemetry,
   FlightTelemetry,
+  GunTracerTelemetry,
   MissileTelemetry,
   ReceivedFlightTelemetry,
 } from '../webrtc';
@@ -47,6 +48,7 @@ interface FlightViewportProps {
   localPlayerId: string;
   localPoseRef: RefObject<LocalPose | null>;
   localMissilesRef: RefObject<MissileTelemetry[]>;
+  localGunTracersRef: RefObject<Array<Omit<GunTracerTelemetry, 'ageSeconds'> & { firedAt: number }>>;
   localCountermeasuresRef: RefObject<CountermeasureTelemetry[]>;
   radarEnabled: boolean;
   remoteTelemetries: FlightTelemetry[];
@@ -107,6 +109,13 @@ interface MissileVisualInstance {
   locallySimulated: boolean;
 }
 
+interface GunTracerVisual {
+  model: THREE.Mesh;
+  origin: THREE.Vector3;
+  direction: THREE.Vector3;
+  firedAt: number;
+}
+
 // Owns per-decoy geometry/materials; the particle texture is shared by the scene.
 interface CountermeasureVisualInstance {
   model: THREE.Group;
@@ -155,6 +164,9 @@ const ADSB_INTERPOLATION_DELAY_MS = ADSB_POLL_INTERVAL_MS * 1.25;
 const ADSB_VISUAL_SMOOTHING_SECONDS = 0.35;
 const KNOTS_TO_FEET_PER_SECOND = 1.687809857;
 const MAX_MISSILE_EXTRAPOLATION_MS = 200;
+const GUN_TRACER_SPEED_FEET_PER_SECOND = 4000;
+const GUN_TRACER_RANGE_FEET = 6076.12;
+const GUN_TRACER_LENGTH_FEET = 200;
 const MISSILE_ROTATION_SMOOTHING_SECONDS = 0.035;
 const MAX_REMOTE_SAMPLES = 20;
 // Each active point light adds per-fragment work to every lit material, so only the nearest aircraft are lit at night.
@@ -1175,6 +1187,7 @@ export default function FlightViewport({
   localPlayerId,
   localPoseRef,
   localMissilesRef,
+  localGunTracersRef,
   localCountermeasuresRef,
   radarEnabled,
   remoteTelemetries,
@@ -1231,6 +1244,10 @@ export default function FlightViewport({
     const scene = new THREE.Scene();
     sceneRef.current = scene;
     scene.background = DAY_SKY.clone();
+    const tracerGeometry = new THREE.CylinderGeometry(0.002, 0.004, 1, 6);
+    const tracerMaterial = new THREE.MeshBasicMaterial({ color: 0xffc15e, fog: false });
+    const tracers: GunTracerVisual[] = [];
+    const seenTracers = new Map<string, number>();
     const flareParticleTexture = createFlareParticleTexture();
     // Fog is measured in scene units (feet * visualScale), not simulator feet.
     scene.fog = new THREE.Fog(DAY_SKY, FOG_NEAR, FOG_FAR);
@@ -1610,6 +1627,38 @@ export default function FlightViewport({
         }
       }
     };
+    const addTracer = (
+      ownerId: string,
+      tracer: Omit<GunTracerTelemetry, 'ageSeconds'>,
+      firedAt: number,
+      now: number,
+    ) => {
+      const key = `${ownerId}:${tracer.shotId}`;
+      if (seenTracers.has(key)) return;
+      seenTracers.set(key, now);
+      if ((now - firedAt) / 1000 * GUN_TRACER_SPEED_FEET_PER_SECOND >= GUN_TRACER_RANGE_FEET) {
+        return;
+      }
+      const position = getLocalPosition(terrainOriginRef.current, tracer);
+      const rotation = new THREE.Euler(
+        THREE.MathUtils.degToRad(tracer.pitch),
+        -THREE.MathUtils.degToRad(tracer.heading),
+        -THREE.MathUtils.degToRad(tracer.roll),
+        'YXZ',
+      );
+      const direction = new THREE.Vector3(0, 0, -1).applyEuler(rotation);
+      const muzzleOffset = new THREE.Vector3(6, -5, -60).applyEuler(rotation);
+      const origin = new THREE.Vector3(
+        position.posXFeet,
+        tracer.altitude,
+        position.posZFeet,
+      ).add(muzzleOffset).multiplyScalar(visualScale);
+      const model = new THREE.Mesh(tracerGeometry, tracerMaterial);
+      model.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction);
+      scene.add(model);
+      tracers.push({ model, origin, direction, firedAt });
+    };
+
     // Interpolates remote traffic and updates time-dependent lighting each frame.
     const animate = (frameTime?: number) => {
       animId = requestAnimationFrame(animate);
@@ -1770,6 +1819,9 @@ export default function FlightViewport({
         for (const received of receivedSamples) {
           if (received.telemetry.sequence <= instance.lastSequence) continue;
           ingestRemoteSample(instance, received, terrainOriginRef.current);
+          for (const tracer of received.telemetry.gunTracers ?? []) {
+            addTracer(playerId, tracer, received.receivedAt - tracer.ageSeconds * 1000, now);
+          }
           ingestRemoteMissiles(
             playerId,
             received.telemetry.missiles ?? [],
@@ -1778,6 +1830,29 @@ export default function FlightViewport({
           );
         }
         receivedSamples.length = 0;
+      }
+      for (const tracer of localGunTracersRef.current) {
+        addTracer(localPlayerIdRef.current, tracer, tracer.firedAt, now);
+      }
+      for (let index = tracers.length - 1; index >= 0; index -= 1) {
+        const tracer = tracers[index];
+        const distance = Math.max(0, (now - tracer.firedAt) / 1000) *
+          GUN_TRACER_SPEED_FEET_PER_SECOND;
+        if (distance >= GUN_TRACER_RANGE_FEET) {
+          scene.remove(tracer.model);
+          tracers.splice(index, 1);
+          continue;
+        }
+        const length = Math.min(GUN_TRACER_LENGTH_FEET, distance);
+        tracer.model.visible = length > 0;
+        tracer.model.scale.y = length * visualScale;
+        tracer.model.position.copy(tracer.origin).addScaledVector(
+          tracer.direction,
+          (distance - length / 2) * visualScale,
+        );
+      }
+      for (const [key, seenAt] of seenTracers) {
+        if (now - seenAt > 5000) seenTracers.delete(key);
       }
       for (const instance of remoteAircrafts.values()) {
         const { aircraft, lights, samples } = instance;
@@ -2304,6 +2379,9 @@ export default function FlightViewport({
       for (const instance of countermeasureInstances.values()) {
         disposeCountermeasure(scene, instance);
       }
+      for (const tracer of tracers) scene.remove(tracer.model);
+      tracerGeometry.dispose();
+      tracerMaterial.dispose();
       scene.traverse(object => {
         if (object instanceof THREE.DirectionalLight) object.shadow.dispose();
         if (
@@ -2335,6 +2413,7 @@ export default function FlightViewport({
     };
   }, [
     localCountermeasuresRef,
+    localGunTracersRef,
     localMissilesRef,
     localPlayerIdRef,
     localPoseRef,

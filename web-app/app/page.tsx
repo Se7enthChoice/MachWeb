@@ -41,6 +41,7 @@ import type {
   CountermeasureTelemetry,
   FlightTelemetry,
   GunHitTelemetry,
+  GunTracerTelemetry,
   MissileTelemetry,
   ReceivedFlightTelemetry,
 } from './webrtc';
@@ -136,6 +137,10 @@ interface SimEngineInstance {
 
 interface ActiveGunHit extends GunHitTelemetry {
   expiresAt: number;
+}
+
+interface ActiveGunTracer extends Omit<GunTracerTelemetry, 'ageSeconds'> {
+  firedAt: number;
 }
 
 interface SimEngineModule {
@@ -480,6 +485,8 @@ export default function Home() {
   const processedGunHitsRef = useRef(new Map<string, number>());
   const localGunHitsRef = useRef<ActiveGunHit[]>([]);
   const nextGunHitIdRef = useRef(1);
+  const localGunTracersRef = useRef<ActiveGunTracer[]>([]);
+  const nextGunShotIdRef = useRef(1);
   const terrainNeighborhoodKey = getTerrainNeighborhoodKey(terrainOrigin, posX, posZ);
 
   const adsbTelemetries = useMemo<FlightTelemetry[]>(
@@ -1102,6 +1109,7 @@ export default function Home() {
     processedMissileImpactsRef.current.clear();
     processedGunHitsRef.current.clear();
     localGunHitsRef.current = [];
+    localGunTracersRef.current = [];
     primaryTargetIdRef.current = null;
     setPrimaryTargetId(null);
     if (!playerIdRef.current) playerIdRef.current = createId();
@@ -1144,6 +1152,7 @@ export default function Home() {
     processedMissileImpactsRef.current.clear();
     processedGunHitsRef.current.clear();
     localGunHitsRef.current = [];
+    localGunTracersRef.current = [];
     setAdsbStatus('ADS-B off - add an API key in preflight.');
     setWeatherPreset('real');
     weatherPresetRef.current = 'real';
@@ -1187,8 +1196,25 @@ export default function Home() {
 
     const fireGun = (): void => {
       if (!engineInstance) return;
+      const previousAmmo = engineInstance.getGunAmmo();
       const hitTargetId = engineInstance.shootGun();
-      setSelectedWeaponAmmo(engineInstance.getGunAmmo());
+      const remainingAmmo = engineInstance.getGunAmmo();
+      setSelectedWeaponAmmo(remainingAmmo);
+      if (remainingAmmo < previousAmmo) {
+        const firedAt = performance.now();
+        localGunTracersRef.current = [
+          ...localGunTracersRef.current.filter(tracer => firedAt - tracer.firedAt < 1000),
+          {
+            shotId: nextGunShotIdRef.current++,
+            ...getAircraftCoordinates(terrainOrigin, engineInstance.getPosX(), engineInstance.getPosZ()),
+            altitude: engineInstance.getAltitude(),
+            heading: engineInstance.getHeading(),
+            pitch: engineInstance.getPitch(),
+            roll: engineInstance.getRoll(),
+            firedAt,
+          },
+        ].slice(-32);
+      }
       const impactPlayerId = radarTargetPlayerIdsRef.current.get(hitTargetId);
       if (!impactPlayerId) return;
       const now = performance.now();
@@ -1476,6 +1502,9 @@ export default function Home() {
 
             // Refresh collision targets even if radar is powered off or has no acquired tracks.
             const now = performance.now();
+            localGunTracersRef.current = localGunTracersRef.current.filter(
+              tracer => now - tracer.firedAt < 1000,
+            );
             const recentAircraftTargets = remoteTelemetriesRef.current
               .filter(
                 telemetry => {
@@ -1771,6 +1800,10 @@ export default function Home() {
                 gunHits: localGunHitsRef.current.map(({ gunHitId, impactPlayerId }) => ({
                   gunHitId,
                   impactPlayerId,
+                })),
+                gunTracers: localGunTracersRef.current.map(({ firedAt, ...tracer }) => ({
+                  ...tracer,
+                  ageSeconds: Math.max(0, (now - firedAt) / 1000),
                 })),
                 countermeasures: readCountermeasures(),
               };
@@ -2091,6 +2124,7 @@ export default function Home() {
             localPlayerId={localPlayerId}
             localPoseRef={localPoseRef}
             localMissilesRef={localMissilesRef}
+            localGunTracersRef={localGunTracersRef}
             localCountermeasuresRef={localCountermeasuresRef}
             radarEnabled={radarEnabled}
             remoteTelemetries={remoteTelemetries}

@@ -23,6 +23,7 @@ export interface FlightTelemetry {
   radarDetectedPlayerIds?: string[];
   missiles?: MissileTelemetry[];
   gunHits?: GunHitTelemetry[];
+  gunTracers?: GunTracerTelemetry[];
   countermeasures?: CountermeasureTelemetry[];
 }
 
@@ -47,12 +48,24 @@ export interface MissileTelemetry {
   impactPlayerId?: string | null; // Aircraft actually hit
 }
 
-// Compact decoy snapshots replicate seeker type, world position, and age to peers.
 export interface GunHitTelemetry {
   gunHitId: number;
   impactPlayerId: string;
 }
 
+// Recent shots are repeated in snapshots so dropped packets do not hide gunfire.
+export interface GunTracerTelemetry {
+  shotId: number;
+  latitude: number;
+  longitude: number;
+  altitude: number;
+  heading: number;
+  pitch: number;
+  roll: number;
+  ageSeconds: number;
+}
+
+// Compact decoy snapshots replicate seeker type, world position, and age to peers.
 export interface CountermeasureTelemetry {
   countermeasureId: number;
   typeId: 1 | 2; // Stable IDs shared with the C++ simulation: chaff=1, flare=2.
@@ -217,6 +230,28 @@ function isFlightTelemetry(value: unknown): value is FlightTelemetry {
         gunHit.impactPlayerId.length <= 64,
       ));
 
+  const validGunTracers =
+    value.gunTracers === undefined ||
+    (Array.isArray(value.gunTracers) &&
+      value.gunTracers.length <= 32 &&
+      value.gunTracers.every(tracer =>
+        isRecord(tracer) &&
+        typeof tracer.shotId === 'number' &&
+        Number.isSafeInteger(tracer.shotId) &&
+        tracer.shotId > 0 &&
+        typeof tracer.latitude === 'number' &&
+        Number.isFinite(tracer.latitude) &&
+        tracer.latitude >= -90 && tracer.latitude <= 90 &&
+        typeof tracer.longitude === 'number' &&
+        Number.isFinite(tracer.longitude) &&
+        tracer.longitude >= -180 && tracer.longitude <= 180 &&
+        ['altitude', 'heading', 'pitch', 'roll'].every(field =>
+          typeof tracer[field] === 'number' && Number.isFinite(tracer[field])) &&
+        typeof tracer.ageSeconds === 'number' &&
+        Number.isFinite(tracer.ageSeconds) &&
+        tracer.ageSeconds >= 0 && tracer.ageSeconds <= 1,
+      ));
+
   // Bound remote decoy count and age so stale or malformed signatures cannot persist.
   const validCountermeasures =
     value.countermeasures === undefined ||
@@ -271,6 +306,7 @@ function isFlightTelemetry(value: unknown): value is FlightTelemetry {
           ))) &&
     validMissiles &&
     validGunHits &&
+    validGunTracers &&
     validCountermeasures
   );
 }
