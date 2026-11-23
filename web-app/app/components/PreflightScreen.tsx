@@ -110,6 +110,17 @@ export default function PreflightScreen({
       <section className="relative w-full max-w-3xl overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/95 shadow-2xl">
         <div className="border-b border-zinc-800 px-6 py-7 sm:px-10 sm:py-9">
           <p className="mb-3 text-xs font-bold tracking-[0.3em] text-emerald-400">MACHWEB</p>
+          <p className="mb-3 text-sm text-zinc-400">
+            A browser-native 6DOF flight simulator.{' '}
+            <a
+              href="https://github.com/Se7enthChoice/MachWeb"
+              target="_blank"
+              rel="noreferrer"
+              className="text-emerald-400 underline decoration-emerald-400/50 underline-offset-4 transition hover:text-emerald-300"
+            >
+              View on GitHub
+            </a>
+          </p>
           <h1 className="text-3xl font-bold tracking-wide text-zinc-100 sm:text-5xl">PREFLIGHT</h1>
           <p className="mt-3 max-w-xl text-sm leading-6 text-zinc-400">
             Set up your flight before entering the cockpit.
